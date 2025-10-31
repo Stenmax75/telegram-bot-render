@@ -1,32 +1,32 @@
 import logging
 import asyncio
-import uvicorn # <-- НОВЫЙ ИМПОРТ
 from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager # <--- НОВЫЙ ИМПОРТ
 
 # Импорт конфигурации и логики бота
 from config_1 import (
     BOT_TOKEN, 
-    WEB_SERVER_HOST, 
-    WEB_SERVER_PORT, 
+    # WEB_SERVER_HOST,  <--- УДАЛЕНО
+    # WEB_SERVER_PORT,  <--- УДАЛЕНО
     BASE_WEBHOOK_URL,
     WEBHOOK_SECRET
 )
-from main_3 import dp, bot # Импортируем диспетчер и бота из основного файла
-from database import db # Импортируем объект базы данных
-from main_3 import check_for_unsubs # Импортируем фоновую задачу
+from main_3 import dp, bot
+from database import db
+from main_3 import check_for_unsubs
 
 # --- Настройка логирования ---
 logger = logging.getLogger(__name__)
 
 # --- Основные настройки Webhook ---
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+# BASE_WEBHOOK_URL будет установлен Render как $RENDER_EXTERNAL_URL
+WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}" 
 
-# -------------------------- Lifespan Context Manager --------------------------
+# -------------------------- Lifespan Context Manager (Startup/Shutdown) --------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,13 +34,13 @@ async def lifespan(app: FastAPI):
     Управляет событиями запуска (startup) и остановки (shutdown) сервера.
     Используется вместо устаревших @app.on_event
     """
-    logger.info("--- [STARTUP] Запуск сервера FastAPI ---")
+    logger.info("--- [STARTUP] Запуск сервера FastAPI на Render ---")
 
-    # 1. Подключение к БД (Теперь MySQL)
+    # 1. Подключение к БД 
     if await db.connect():
         logger.info("База данных MySQL подключена.")
     else:
-        logger.critical("🚨 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к MySQL. Бот не будет работать!")
+        logger.critical("🚨 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к MySQL!")
 
     # 2. Установка Webhook
     try:
@@ -54,26 +54,24 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Ошибка установки Webhook: {e}")
 
     # 3. Запуск фоновой задачи проверки отписок
-    asyncio.create_task(check_for_unsubs(bot, db))
-    logger.info("Запущена фоновая задача check_for_unsubs.")
+    if db.pool:
+        asyncio.create_task(check_for_unsubs(bot, db))
+        logger.info("Запущена фоновая задача check_for_unsubs.")
     
-    # --------------------------
     yield # Сервер начинает принимать запросы
-    # --------------------------
 
     # --- SHUTDOWN LOGIC ---
     logger.info("--- [SHUTDOWN] Остановка сервера FastAPI ---")
     await db.close()
 
 # Инициализация FastAPI приложения с lifespan
-app = FastAPI(lifespan=lifespan) # <-- ИСПОЛЬЗУЕМ LIFESPAN
+app = FastAPI(lifespan=lifespan) # <--- ИСПОЛЬЗУЕМ LIFESPAN
 
 # -------------------------- Webhook Handler --------------------------
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request, update: dict):
     """Основной обработчик входящих обновлений от Telegram."""
-    # Проверка секретного ключа для защиты Webhook
     if request.headers.get("x-telegram-bot-api-secret-token") != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret token")
 
@@ -85,16 +83,4 @@ async def bot_webhook(request: Request, update: dict):
 
     return {"ok": True}
 
-# -------------------------- Точка входа для самозапуска --------------------------
-
-if __name__ == "__main__":
-    # Запуск Uvicorn напрямую через Python-скрипт
-    logger.info(">>> Запуск Uvicorn в режиме самозапуска <<<")
-    uvicorn.run(
-        "webhook_handler:app",  # Модуль и объект приложения
-        host=WEB_SERVER_HOST,   # '0.0.0.0'
-        port=WEB_SERVER_PORT,   # '8080'
-        log_level="info",
-        reload=False,           
-        app_dir="/home/container"
-    )
+# !!! ЛОКАЛЬНЫЙ ЗАПУСК Uvicorn УДАЛЕН !!!
