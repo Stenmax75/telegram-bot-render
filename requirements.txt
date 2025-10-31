@@ -5,4 +5,5 @@ python-dotenv==1.1.1
 aiomysql
 # Webhook/Сервер
 fastapi
+gunicorn
 uvicorn
