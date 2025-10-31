@@ -1,0 +1,371 @@
+# main_3.py (Исправленная версия)
+
+import asyncio
+import logging
+import re
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ChatMemberStatus
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command # <-- Убедитесь, что этот импорт есть
+
+# Импорт конфигурации и базы данных
+from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
+from database import db # Используем db, который теперь использует aiomysql
+
+# Настройка логирования для вывода ошибок в консоль
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+dp = Dispatcher()
+
+# --- FSM States (Машина конечных состояний) ---
+class ChannelForm(StatesGroup):
+    waiting_for_channel_link = State()
+
+# -------------------------- Хелперы и проверки --------------------------
+
+async def is_member(user_id: int, channel_id: int) -> bool:
+    """Реальная проверка подписки пользователя на канал."""
+    try:
+        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        # Проверяем, что статус не 'left' и не 'kicked'
+        return member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
+    except TelegramBadRequest as e:
+        logger.error(f"Ошибка проверки членства ({channel_id}, {user_id}): {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при проверке членства: {e}")
+        return False
+
+# -------------------------- КЛАВИАТУРЫ --------------------------
+
+def get_main_keyboard(is_registered: bool = False):
+    """Возвращает основную клавиатуру."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎯 Хочу Подписку (Обмен)", callback_data="start_exchange")
+    if is_registered:
+        builder.button(text="📊 Мой Канал (Баланс)", callback_data="my_channel_stats")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_join_main_channel_keyboard(link: str):
+    """Кнопка для вступления в основной канал."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подписаться на @life_in_stile", url=link)
+    builder.button(text="Проверить подписку", callback_data="check_required_sub")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_subscription_keyboard(channel_link: str, channel_id: int):
+    """Кнопки для подписки на целевой канал."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подписаться на канал", url=channel_link)
+    builder.button(text="Подписка оформлена", callback_data=f"sub_done:{channel_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# -------------------------- ХЕНДЛЕРЫ ЛОГИКИ БОТА --------------------------
+
+# --- /start и Проверка обязательной подписки ---
+
+@dp.message(Command("start")) # <-- ИСПОЛЬЗУЕМ ФИЛЬТР COMMAND
+async def start_handler(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or f"id{user_id}"
+
+    # Добавляем/обновляем пользователя
+    await db.add_user(user_id, username)
+
+    # 1. Проверяем обязательную подписку
+    if not await is_member(user_id, REQUIRED_CHANNEL_ID):
+        await message.answer(
+            "👋 Добро пожаловать!\n\n"
+            "Для начала работы с ботом, пожалуйста, подпишитесь на наш основной канал:",
+            reply_markup=get_join_main_channel_keyboard(REQUIRED_CHANNEL_ID)
+        )
+        return
+
+    # 2. Если подписан, показываем основную клавиатуру
+    channel_info = await db.get_user_channel_info(user_id)
+    # channel_info — это кортеж (ID, link, title, subs_needed)
+    await message.answer(
+        "✅ Вы подписаны на наш канал. Выберите действие:",
+        reply_markup=get_main_keyboard(is_registered=channel_info is not None)
+    )
+
+@dp.callback_query(F.data == "check_required_sub")
+async def process_check_required_sub(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # 1. Проверяем подписку на обязательный канал
+    if await is_member(user_id, REQUIRED_CHANNEL_ID):
+        # 2. Проверяем, зарегистрирован ли пользователь
+        channel_info = await db.get_user_channel_info(user_id)
+        
+        await callback.message.edit_text(
+            "✅ Вы успешно подписались на наш канал!\n\n"
+            "Теперь вы можете обмениваться подписками.",
+            reply_markup=get_main_keyboard(is_registered=channel_info is not None)
+        )
+    else:
+        await callback.answer("❌ Подписка не найдена. Пожалуйста, подпишитесь.")
+
+# --- FSM: Регистрация канала ---
+
+@dp.callback_query(F.data == "register_channel")
+async def register_channel_start(callback: types.CallbackQuery, state: FSMContext):
+    # Проверка, что пользователь не имеет зарегистрированного канала
+    if await db.get_user_channel_info(callback.from_user.id):
+        await callback.answer("У вас уже есть зарегистрированный канал.", show_alert=True)
+        return
+        
+    await state.set_state(ChannelForm.waiting_for_channel_link)
+    await callback.message.edit_text(
+        "📝 **Регистрация канала**\n\n"
+        "Отправьте мне публичную ссылку на ваш Telegram-канал (например, `@channel_name` или `https://t.me/channel_name`).\n\n"
+        "**Важно:** Бот должен быть **администратором** вашего канала с правом **приглашения пользователей** для проверки подписок.",
+        reply_markup=None
+    )
+    await callback.answer()
+
+@dp.message(ChannelForm.waiting_for_channel_link)
+async def process_channel_link(message: types.Message, state: FSMContext):
+    link = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Извлечение username из ссылки
+    match = re.search(r"@(\w+)|t\.me/(\w+)", link, re.IGNORECASE)
+    if not match:
+        await message.answer("❌ Некорректный формат ссылки. Используйте `@username` или `https://t.me/username`.")
+        return
+    
+    channel_username = '@' + (match.group(1) or match.group(2))
+    
+    try:
+        # 1. Проверка, что бот является администратором
+        chat_member = await bot.get_chat_member(chat_id=channel_username, user_id=bot.id)
+        if chat_member.status != ChatMemberStatus.ADMINISTRATOR:
+            await message.answer(
+                f"❌ Бот не является администратором в канале {channel_username}. "
+                "Пожалуйста, сделайте бота администратором и повторите."
+            )
+            return
+
+        # 2. Получаем полную информацию о канале
+        chat = await bot.get_chat(chat_id=channel_username)
+        channel_id = chat.id # ID канала (отрицательное число)
+        
+        # 3. Проверка, что владелец сообщения (пользователь) является владельцем канала
+        owner_member = await bot.get_chat_member(chat_id=channel_username, user_id=user_id)
+        if owner_member.status not in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
+            await message.answer("❌ Вы не являетесь владельцем или администратором этого канала.")
+            return
+
+        # 4. Сохранение в БД
+        await db.add_channel(user_id, channel_id, channel_username, chat.title)
+        
+        await message.answer(
+            f"✅ Канал **{chat.title}** ({channel_username}) успешно зарегистрирован!\n\n"
+            "Теперь вы можете начать обмен подписками.",
+            reply_markup=get_main_keyboard(is_registered=True)
+        )
+        await state.clear()
+
+    except TelegramBadRequest as e:
+        logger.error(f"Ошибка регистрации канала: {e}")
+        await message.answer(
+            "❌ Не удалось найти канал по этой ссылке. Убедитесь, что канал **публичный** "
+            "и ссылка верна, или что бот является его администратором."
+        )
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка: {e}")
+        await message.answer("Произошла неизвестная ошибка при регистрации канала.")
+    
+# --- Логика обмена ---
+
+@dp.callback_query(F.data == "start_exchange")
+async def start_exchange_process(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # 1. Проверяем, зарегистрирован ли его канал
+    user_channel_info = await db.get_user_channel_info(user_id)
+    if not user_channel_info:
+        await callback.message.edit_text(
+            "⚠️ **Ваш канал не зарегистрирован.**\n\n"
+            "Чтобы начать обмен, сначала зарегистрируйте свой канал:",
+            reply_markup=InlineKeyboardBuilder().button(text="➕ Зарегистрировать канал", callback_data="register_channel").as_markup()
+        )
+        await callback.answer()
+        return
+        
+    # 2. Ищем целевой канал (Channel B)
+    target_channel_info = await db.get_target_channel(user_id)
+    
+    if target_channel_info:
+        # target_channel_info — это кортеж (ID, link, title)
+        target_channel_id, target_channel_link, target_channel_title = target_channel_info
+        
+        await callback.message.edit_text(
+            f"✨ **Обмен Подписками**\n\n"
+            f"**1. Подпишитесь на этот канал:**\n"
+            f"Канал: **{target_channel_title}**\n"
+            f"Ссылка: `{target_channel_link}`\n\n"
+            "Это **обязательное** условие для получения подписчика взамен. После подписки нажмите 'Подписка оформлена'.",
+            reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id)
+        )
+        
+    else:
+        await callback.message.edit_text(
+            "😴 **Нет доступных каналов для обмена.**\n\n"
+            "Все долги на данный момент закрыты. Ваш канал остается в очереди (баланс: 0). "
+            "Попробуйте позже или пригласите друзей!",
+            reply_markup=get_main_keyboard(is_registered=True)
+        )
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("sub_done:"))
+async def process_subscription_done(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    # ID целевого канала B
+    subscribed_channel_id = int(callback.data.split(":")[1]) 
+    
+    # 1. Проверяем, действительно ли пользователь подписался на Channel B
+    if not await is_member(user_id, subscribed_channel_id):
+        await callback.answer("❌ Мы не видим вашей подписки на целевой канал. Попробуйте еще раз.")
+        return
+
+    # 2. Находим свой канал (Channel A), который должен получить подписку взамен
+    user_channel_info = await db.get_user_channel_info(user_id)
+    if not user_channel_info:
+        await callback.answer("Ошибка: Ваш канал не найден. Начните с /start.")
+        return
+
+    subscriber_channel_id = user_channel_info[0] # ID канала A
+
+    # 3. Регистрируем подписку и создаем "долг" для Channel A (Транзакция в database.py)
+    try:
+        await db.register_subscription_and_create_debt(
+            subscriber_user_id=user_id, 
+            subscribed_channel_id=subscribed_channel_id, 
+            subscriber_channel_id=subscriber_channel_id # Канал A
+        )
+        
+        # 4. Уведомление об успехе
+        await callback.message.edit_text(
+            "🎉 **Подписка засчитана!**\n\n"
+            f"Ваш канал **{user_channel_info[2]}** добавлен в очередь. "
+            "Вы получите уведомление, как только на него подпишется другой пользователь.",
+            reply_markup=get_main_keyboard(is_registered=True)
+        )
+        await callback.answer("Подписка успешно засчитана!")
+    except Exception:
+         await callback.answer("❌ Ошибка при регистрации транзакции. Попробуйте снова.")
+
+
+# --- Статистика канала ---
+
+@dp.callback_query(F.data == "my_channel_stats")
+async def show_my_channel_stats(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    channel_info = await db.get_user_channel_info(user_id)
+    if not channel_info:
+        await callback.answer("Ваш канал не зарегистрирован.", show_alert=True)
+        return
+
+    # channel_info — это кортеж (ID, link, title, subs_needed)
+    channel_id, link, title, subs_needed = channel_info
+
+    text = (
+        f"📊 **Статистика вашего канала**\n\n"
+        f"Название: **{title}**\n"
+        f"Ссылка: `{link}`\n"
+        f"Баланс долга: **{subs_needed}**\n\n"
+        f"**Долг {subs_needed}** означает, что столько подписчиков должен получить ваш канал."
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_main_keyboard(is_registered=True)
+    )
+    await callback.answer()
+
+# -------------------------- ФОНОВАЯ ЗАДАЧА (АДАПТИРОВАНА ДЛЯ MySQL) --------------------------
+
+async def check_for_unsubs(bot_instance: Bot, db_instance: db):
+    """Фоновая задача, которая периодически проверяет активные подписки."""
+    while True:
+        # Пауза между проверками (30 минут)
+        await asyncio.sleep(30 * 60)
+        logger.info("Запуск фоновой проверки отписок...")
+        
+        # Получаем активные подписки
+        rows = await db_instance._fetch(
+            """
+            SELECT
+                s.id,
+                s.subscriber_user_id,
+                s.subscribed_channel_id,
+                c.owner_id,
+                s.channel_that_owes_id
+            FROM subscriptions s
+            JOIN channels c ON s.subscribed_channel_id = c.channel_id
+            WHERE s.is_active = TRUE
+            LIMIT 50
+            """
+        )
+
+        for row in rows:
+            # aiomysql fetchall() возвращает список кортежей
+            sub_id = row[0]
+            subscriber_id = row[1]
+            subscribed_channel_id = row[2]
+            owner_id_of_subscribed = row[3] 
+            channel_that_owes_id = row[4] 
+
+            if not await is_member(subscriber_id, subscribed_channel_id):
+                logger.warning(f"Обнаружена отписка: sub_id={sub_id}, user={subscriber_id}")
+
+                # 1. Уведомление владельца канала, от которого отписались 
+                await bot_instance.send_message(
+                    chat_id=owner_id_of_subscribed,
+                    text=f"⚠️ **ВНИМАНИЕ! ОТПИСКА!**\n\n"
+                         f"Пользователь с ID **{subscriber_id}** **отписался** от вашего канала..."
+                )
+                
+                # 2. Уведомление владельца канала-должника
+                owes_info = await db_instance.get_channel_owner_info(channel_that_owes_id)
+                # owes_info — это кортеж (owner_id, title, link, username)
+                owner_of_owes_id = owes_info[0] if owes_info else None
+                owes_link = owes_info[2] if owes_info else "неизвестный канал"
+                
+                if owner_of_owes_id:
+                    await bot_instance.send_message(
+                        chat_id=owner_of_owes_id,
+                        text=f"❌ **АННУЛИРОВАНИЕ ДОЛГА!**\n\n"
+                             f"Ваш **баланс** (долг) за этот обмен был **аннулирован** и будет **уменьшен на 1**."
+                    )
+                    
+                    # 3. Уменьшение счетчика долга для Канала А (ИСПОЛЬЗУЕМ %s)
+                    await db_instance._execute(
+                        """UPDATE channels 
+                           SET subscribers_needed = subscribers_needed - 1 
+                           WHERE channel_id = %s""",
+                        channel_that_owes_id
+                    )
+
+                # 4. Установка статуса подписки как неактивной (ИСПОЛЬЗУЕМ %s)
+                await db_instance._execute(
+                    "UPDATE subscriptions SET is_active = FALSE WHERE id = %s",
+                    sub_id
+                )
+
+# !!! ВАЖНО: В КОНЦЕ ФАЙЛА НЕТ БЛОКОВ async def main() И if __name__ == "__main__":
+# Бот запускается через файл webhook_handler.py

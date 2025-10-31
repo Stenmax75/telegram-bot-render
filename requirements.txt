@@ -1,0 +1,8 @@
+# requirements.txt
+aiogram==3.22.0
+python-dotenv==1.1.1
+# База данных
+aiomysql
+# Webhook/Сервер
+fastapi
+uvicorn
