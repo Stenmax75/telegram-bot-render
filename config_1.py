@@ -22,11 +22,12 @@ DB_PORT = int(os.getenv("DB_PORT", 4000)) # Изменили порт по ум�
 
 # Webhook (Server Configuration)
 # УДАЛЕНЫ WEB_SERVER_HOST и WEB_SERVER_PORT - Render управляет ими через $PORT.
-BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") 
+BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
 # Проверка на наличие критически важных данных
 if not (BOT_TOKEN and BASE_WEBHOOK_URL and DB_USER and DB_HOST and DB_NAME):
     # Добавили DB_PORT в условие
 
     raise ValueError("Одна или несколько критически важных переменных (BOT_TOKEN, BASE_WEBHOOK_URL, DB_USER, DB_HOST, DB_NAME, DB_PORT) не найдены.")
+
 
