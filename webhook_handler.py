@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
         logger.info("База данных MySQL подключена.")
     else:
         logger.critical("🚨 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к MySQL!")
-    await asyncio.sleep(3)
+    await asyncio.sleep(8)
     # 2. Установка Webhook
     try:
         await bot.set_webhook(
@@ -84,4 +84,5 @@ async def bot_webhook(request: Request, update: dict):
     return {"ok": True}
 
 # !!! ЛОКАЛЬНЫЙ ЗАПУСК Uvicorn УДАЛЕН !!!
+
 
