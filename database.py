@@ -1,6 +1,8 @@
-# database.py (Переписан для aiomysql с поддержкой SSL для TiDB Cloud)
+# database.py (Исправлен для aiomysql с поддержкой SSL через ssl.SSLContext)
 import aiomysql
 import logging
+# !!! ДОБАВЛЕН ИМПОРТ !!!
+import ssl 
 from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,17 @@ class Database:
             return False
             
         try:
+            # --- ИСПРАВЛЕНИЕ: Создание SSL-контекста вручную вместо передачи словаря ---
+            # Это устраняет ошибку 'dict' object has no attribute 'wrap_bio'
+            ssl_context = ssl.create_default_context(
+                # Указываем путь к файлу сертификата
+                cafile='ca.pem'
+            )
+            # Требуем строгую проверку подлинности сервера, соответствующую 'verify_identity': True
+            ssl_context.check_hostname = True 
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            # --------------------------------------------------------------------------
+
             self.pool = await aiomysql.create_pool(
                 host=DB_HOST,
                 port=DB_PORT,
@@ -27,14 +40,9 @@ class Database:
                 autocommit=True, 
                 minsize=1,
                 maxsize=10,
-                # --- НОВОЕ: Настройки SSL для TiDB Cloud (Используем ca.pem) ---
-                ssl={
-                    # Указываем путь к файлу сертификата, который должен быть в корне проекта
-                    'ca': 'ca.pem',
-                    # Требуем проверку подлинности сервера для безопасности
-                    'verify_identity': True, 
-                }
-                # -------------------------------------------------------------
+                # --- ИСПРАВЛЕНО: Теперь передаем объект контекста ---
+                ssl=ssl_context # <<< Передаем объект SSLContext
+                # ---------------------------------------------------
             )
             logger.info("База данных: Пул подключений к MySQL успешно создан.")
             await self._create_tables()
