@@ -1,8 +1,9 @@
-# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК)
+# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК + ИСПРАВЛЕНИЕ ОШИБКИ FSM/CALLBACK)
 
 import asyncio
 import logging
 import re
+from typing import Union # Добавляем Union для подсказки типов
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -195,15 +196,9 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             reply_markup=None
         )
 
-        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА
-        await start_exchange_process(
-            types.CallbackQuery(
-                id="dummy_id", 
-                from_user=message.from_user, 
-                message=message, 
-                data="start_exchange"
-            )
-        )
+        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА: ИСПРАВЛЕН
+        # Передаем сам объект message, чтобы избежать ошибки валидации CallbackQuery
+        await start_exchange_process(message) 
 
     # --- УЛУЧШЕННАЯ ОБРАБОТКА ОШИБОК ---
     except TelegramBadRequest as e:
@@ -215,49 +210,56 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         # Остаемся в состоянии для повтора
     
     except Exception as e:
+        # Мы поймали ошибку здесь! (pydantic.ValidationError)
         logger.error(f"Неизвестная ошибка в process_channel_link (link: {link}): {e}")
         await message.answer("Произошла неизвестная ошибка при регистрации канала. Попробуйте снова.")
         
-# --- Логика обмена ---
+# -------------------------- ЛОГИКА ОБМЕНА (ИСПРАВЛЕНА) --------------------------
 
 @dp.callback_query(F.data == "start_exchange")
-async def start_exchange_process(callback: types.CallbackQuery): 
+async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Message]): 
+    """
+    Обрабатывает запуск обмена подписками, вызванный либо CallbackQuery (кнопка),
+    либо Message (автозапуск после FSM).
+    """
     
-    # Определяем, откуда пришел вызов (из FSM или с кнопки)
-    if isinstance(callback, types.CallbackQuery):
-        message_to_edit = callback.message
-        user_id = callback.from_user.id
-    else:
-        message_to_edit = callback # Это Message из FSM
-        user_id = callback.from_user.id
+    is_callback = isinstance(update_obj, types.CallbackQuery)
 
-    user_id = callback.from_user.id
+    if is_callback:
+        message_to_edit = update_obj.message
+        user_id = update_obj.from_user.id
+    else:
+        # Если это Message (после FSM)
+        message_to_edit = update_obj
+        user_id = update_obj.from_user.id
     
     # 1. Проверяем, зарегистрирован ли его канал
     user_channel_info = await db.get_user_channel_info(user_id)
+    
+    # Если канал не зарегистрирован (чего не должно быть при автозапуске, но нужно для кнопки)
     if not user_channel_info:
-        if isinstance(callback, types.CallbackQuery):
-            await message_to_edit.edit_text(
-                "⚠️ **Ваш канал не зарегистрирован.**\n\n"
-                "Чтобы начать обмен, сначала зарегистрируйте свой канал:",
-                reply_markup=InlineKeyboardBuilder().button(text="➕ Зарегистрировать канал", callback_data="register_channel").as_markup()
-            )
-            await callback.answer()
-        else:
-            await message_to_edit.answer(
-                "⚠️ **Ваш канал не зарегистрирован.**\n\n"
-                "Чтобы начать обмен, сначала зарегистрируйте свой канал:",
-                reply_markup=InlineKeyboardBuilder().button(text="➕ Зарегистрировать канал", callback_data="register_channel").as_markup()
-            )
+        # Если это Callback, редактируем; если Message, отвечаем.
+        edit_func = message_to_edit.edit_text if is_callback and message_to_edit.text else message_to_edit.answer
+        
+        await edit_func(
+            "⚠️ **Ваш канал не зарегистрирован.**\n\n"
+            "Чтобы начать обмен, сначала зарегистрируйте свой канал:",
+            reply_markup=InlineKeyboardBuilder().button(text="➕ Зарегистрировать канал", callback_data="register_channel").as_markup()
+        )
+        if is_callback:
+            await update_obj.answer()
         return
         
     # 2. Ищем целевой канал (Channel B)
     target_channel_info = await db.get_target_channel(user_id)
     
+    # Определяем функцию ответа
+    edit_func = message_to_edit.edit_text if is_callback and message_to_edit.text else message_to_edit.answer
+    
     if target_channel_info:
         target_channel_id, target_channel_link, target_channel_title = target_channel_info
         
-        await message_to_edit.edit_text(
+        await edit_func(
             f"✨ **Обмен Подписками**\n\n"
             f"**1. Подпишитесь на этот канал:**\n"
             f"Канал: **{target_channel_title}**\n"
@@ -267,15 +269,17 @@ async def start_exchange_process(callback: types.CallbackQuery):
         )
         
     else:
-        await message_to_edit.edit_text(
+        await edit_func(
             "😴 **Нет доступных каналов для обмена.**\n\n"
             "Все долги на данный момент закрыты. Ваш канал остается в очереди (баланс: 0). "
             "Попробуйте позже или пригласите друзей!",
             reply_markup=get_main_keyboard(is_registered=True)
         )
     
-    if isinstance(callback, types.CallbackQuery):
-        await callback.answer()
+    if is_callback:
+        await update_obj.answer()
+
+# -------------------------- ОСТАЛЬНЫЕ ХЕНДЛЕРЫ БЕЗ ИЗМЕНЕНИЙ --------------------------
 
 @dp.callback_query(F.data.startswith("sub_done:"))
 async def process_subscription_done(callback: types.CallbackQuery):
