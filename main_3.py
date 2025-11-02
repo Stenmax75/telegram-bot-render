@@ -1,9 +1,9 @@
-# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК + ИСПРАВЛЕНИЕ ОШИБКИ FSM/CALLBACK)
+# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК + ИСПРАВЛЕНИЕ ОШИБКИ FSM/CALLBACK + ИСПРАВЛЕНИЕ ОШИБКИ URL)
 
 import asyncio
 import logging
 import re
-from typing import Union # Добавляем Union для подсказки типов
+from typing import Union
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -15,9 +15,9 @@ from aiogram.filters import Command
 
 # Импорт конфигурации и базы данных
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
-from database import db
+from database import db # Предполагается, что ваш database.py обновлен
 
-# Настройка логирования для вывода ошибок в консоль
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,12 @@ async def is_member(user_id: int, channel_id: int) -> bool:
         logger.error(f"Неизвестная ошибка при проверке членства: {e}")
         return False
 
+def format_link_for_button(link: str) -> str:
+    """Преобразует @username в https://t.me/username для Inline-кнопки."""
+    if link.startswith('@'):
+        return f"https://t.me/{link.lstrip('@')}"
+    return link
+
 # -------------------------- КЛАВИАТУРЫ --------------------------
 
 def get_main_keyboard(is_registered: bool = False):
@@ -73,9 +79,12 @@ def get_join_main_channel_keyboard():
     return builder.as_markup()
 
 def get_subscription_keyboard(channel_link: str, channel_id: int):
-    """Кнопки для подписки на целевой канал."""
+    """Кнопки для подписки на целевой канал. ИСПРАВЛЕН URL."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Подписаться на канал", url=channel_link)
+    # ИСПРАВЛЕНИЕ: Преобразуем ссылку в валидный URL
+    valid_url = format_link_for_button(channel_link) 
+    
+    builder.button(text="✅ Подписаться на канал", url=valid_url)
     builder.button(text="Подписка оформлена", callback_data=f"sub_done:{channel_id}")
     builder.adjust(1)
     return builder.as_markup()
@@ -145,7 +154,7 @@ async def register_channel_start(callback: types.CallbackQuery, state: FSMContex
     await callback.message.edit_text(
         "📝 **Регистрация канала**\n\n"
         "Отправьте мне публичную ссылку на ваш Telegram-канал (например, `@channel_name` или `https://t.me/channel_name`).\n\n"
-        "**Важно:** Бот должен быть **администратором** вашего канала с правом **приглашения пользователей** для проверки подписок.",
+        "**Важно:** Бот должен быть **администратором** вашего канала (право **приглашения пользователей**).", # Оставил упоминание
         reply_markup=None
     )
     await callback.answer()
@@ -166,22 +175,9 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     try:
         # !!! ВРЕМЕННО ОТКЛЮЧЕНО: ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА И ВЛАДЕЛЬЦА !!!
         
-        # chat_member = await bot.get_chat_member(chat_id=channel_username, user_id=bot.id)
-        # if chat_member.status != ChatMemberStatus.ADMINISTRATOR:
-        #     await message.answer(
-        #         f"❌ Бот не является администратором в канале {channel_username}. "
-        #         "Пожалуйста, сделайте бота администратором и повторите."
-        #     )
-        #     return
-        
         # Получаем полную информацию о канале
         chat = await bot.get_chat(chat_id=channel_username)
         channel_id = chat.id
-        
-        # owner_member = await bot.get_chat_member(chat_id=channel_username, user_id=user_id)
-        # if owner_member.status not in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
-        #     await message.answer("❌ Вы не являетесь владельцем или администратором этого канала.")
-        #     return
         
         # 4. Сохранение в БД
         await db.add_channel(user_id, channel_id, channel_username, chat.title)
@@ -196,8 +192,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             reply_markup=None
         )
 
-        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА: ИСПРАВЛЕН
-        # Передаем сам объект message, чтобы избежать ошибки валидации CallbackQuery
+        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА
         await start_exchange_process(message) 
 
     # --- УЛУЧШЕННАЯ ОБРАБОТКА ОШИБОК ---
@@ -205,12 +200,9 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         logger.error(f"TelegramBadRequest в process_channel_link (link: {link}): {e}")
         await message.answer(
             "❌ Не удалось найти канал по этой ссылке. Убедитесь, что канал **публичный** "
-            "и ссылка верна." # Убрали упоминание администратора, т.к. проверка отключена
+            "и ссылка верна." 
         )
-        # Остаемся в состоянии для повтора
-    
     except Exception as e:
-        # Мы поймали ошибку здесь! (pydantic.ValidationError)
         logger.error(f"Неизвестная ошибка в process_channel_link (link: {link}): {e}")
         await message.answer("Произошла неизвестная ошибка при регистрации канала. Попробуйте снова.")
         
@@ -238,7 +230,7 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
     
     # Если канал не зарегистрирован (чего не должно быть при автозапуске, но нужно для кнопки)
     if not user_channel_info:
-        # Если это Callback, редактируем; если Message, отвечаем.
+        # Определяем функцию ответа/редактирования
         edit_func = message_to_edit.edit_text if is_callback and message_to_edit.text else message_to_edit.answer
         
         await edit_func(
@@ -265,7 +257,8 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
             f"Канал: **{target_channel_title}**\n"
             f"Ссылка: `{target_channel_link}`\n\n"
             "Это **обязательное** условие для получения подписчика взамен. После подписки нажмите 'Подписка оформлена'.",
-            reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id)
+            # ИСПОЛЬЗУЕМ ИСПРАВЛЕННУЮ ФУНКЦИЮ
+            reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id) 
         )
         
     else:
@@ -420,3 +413,25 @@ async def check_for_unsubs(bot_instance: Bot, db_instance: db):
                     "UPDATE subscriptions SET is_active = FALSE WHERE id = %s",
                     sub_id
                 )
+
+# -------------------------- ЗАПУСК БОТА --------------------------
+
+async def main():
+    # Устанавливаем соединение с БД
+    await db.connect() 
+    
+    # Запускаем фоновую задачу только если БД успешно подключена
+    if db.pool:
+        # Запуск фоновой задачи проверки отписок
+        dp.startup.register(lambda: asyncio.create_task(check_for_unsubs(bot, db)))
+    
+    logger.info("Бот запущен. Ожидание обновлений...")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Корректное закрытие соединений
+        await db.close()
+        await bot.session.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
