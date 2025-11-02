@@ -1,4 +1,3 @@
-# database.py (ВРЕМЕННАЯ ВЕРСИЯ С ИЗМЕНЕНИЕМ ЛОГИКИ ПОИСКА КАНАЛА ДЛЯ ТЕСТИРОВАНИЯ)
 import aiomysql
 import logging
 import ssl 
@@ -19,13 +18,12 @@ class Database:
             return False
             
         try:
-            # --- ИСПРАВЛЕНИЕ: Создание SSL-контекста вручную вместо передачи словаря ---
+            # Создание SSL-контекста
             ssl_context = ssl.create_default_context(
                 cafile='ca.pem'
             )
             ssl_context.check_hostname = True 
             ssl_context.verify_mode = ssl.CERT_REQUIRED
-            # --------------------------------------------------------------------------
 
             self.pool = await aiomysql.create_pool(
                 host=DB_HOST,
@@ -36,7 +34,7 @@ class Database:
                 autocommit=True, 
                 minsize=1,
                 maxsize=10,
-                ssl=ssl_context # <<< Передаем объект SSLContext
+                ssl=ssl_context
             )
             logger.info("База данных: Пул подключений к MySQL успешно создан.")
             await self._create_tables()
@@ -79,7 +77,7 @@ class Database:
                 return await cur.fetchone()
 
     async def _create_tables(self):
-        """Создание необходимых таблиц с InnoDB для поддержки внешних ключей и транзакций."""
+        """Создание необходимых таблиц."""
         if not self.pool: return
         
         await self._execute("""
@@ -117,7 +115,7 @@ class Database:
     # ------------------- Методы для работы с данными -------------------
 
     async def add_user(self, user_id: int, username: str):
-        """Добавление/обновление пользователя. Используем ON DUPLICATE KEY UPDATE для MySQL."""
+        """Добавление/обновление пользователя."""
         await self._execute(
             """INSERT INTO users (user_id, username) 
                 VALUES (%s, %s)
@@ -144,21 +142,18 @@ class Database:
 
     async def get_target_channel(self, user_id: int):
         """
-        Получение канала для подписки.
-        
-        !!! ВРЕМЕННОЕ ИЗМЕНЕНИЕ ДЛЯ ТЕСТИРОВАНИЯ !!!
-        Условие поиска изменено на 'subscribers_needed >= 0' 
-        (чтобы найти канал, даже если он не имеет активного долга).
+        Получение канала для подписки. 
+        ВРЕМЕННОЕ ИЗМЕНЕНИЕ: subscribers_needed >= 0 для тестирования.
         """
         row = await self._fetchrow(
             """
             SELECT c.channel_id, c.link, c.title
             FROM channels c
             LEFT JOIN subscriptions s ON c.channel_id = s.subscribed_channel_id AND s.subscriber_user_id = %s AND s.is_active = TRUE
-            WHERE c.owner_id != %s 
-              AND c.subscribers_needed >= 0 -- <--- ИЗМЕНЕНИЕ ЗДЕСЬ
-              AND s.subscriber_user_id IS NULL 
-            ORDER BY c.subscribers_needed ASC, RAND() -- Выбираем сначала каналы с наименьшим долгом (0)
+            WHERE c.owner_id != %s
+              AND c.subscribers_needed >= 0 
+              AND s.subscriber_user_id IS NULL
+            ORDER BY c.subscribers_needed ASC, RAND()
             LIMIT 1
             """,
             user_id, user_id
@@ -240,7 +235,7 @@ class Database:
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
                         (channel_that_owes_id,)
                     )
-                    new_subs_needed = (await cur.fetchone())[0] # aiomysql fetchone возвращает кортеж
+                    new_subs_needed = (await cur.fetchone())[0]
                     
                     await conn.commit()
                     return new_subs_needed
@@ -249,5 +244,4 @@ class Database:
                     logger.error(f"MySQL Transaction Rollback: {e}")
                     raise
 
-# Инициализация объекта Database (как Singleton)
 db = Database()
