@@ -1,4 +1,4 @@
-# main_3.py
+# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК)
 
 import asyncio
 import logging
@@ -57,7 +57,6 @@ def get_main_keyboard(is_registered: bool = False):
     builder.button(text="🎯 Хочу Подписку (Обмен)", callback_data="start_exchange")
     if is_registered:
         builder.button(text="📊 Мой Канал (Баланс)", callback_data="my_channel_stats")
-    # Добавление кнопки регистрации, если канал НЕ зарегистрирован
     else:
         builder.button(text="➕ Зарегистрировать канал", callback_data="register_channel")
 
@@ -89,7 +88,7 @@ async def start_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
 
-    # !!! ИСПРАВЛЕНИЕ: Очистка FSM при /start, если пользователь застрял !!!
+    # Очистка FSM при /start, если пользователь застрял
     await state.clear()
     
     # Добавляем/обновляем пользователя
@@ -159,31 +158,30 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     match = re.search(r"@(\w+)|t\.me/(\w+)", link, re.IGNORECASE)
     if not match:
         await message.answer("❌ Некорректный формат ссылки. Используйте `@username` или `https://t.me/username`.")
-        # Остаемся в состоянии
         return
     
     channel_username = '@' + (match.group(1) or match.group(2))
     
     try:
-        # 1. Проверка, что бот является администратором
-        chat_member = await bot.get_chat_member(chat_id=channel_username, user_id=bot.id)
-        if chat_member.status != ChatMemberStatus.ADMINISTRATOR:
-            await message.answer(
-                f"❌ Бот не является администратором в канале {channel_username}. "
-                "Пожалуйста, сделайте бота администратором и повторите."
-            )
-            return # Остаемся в состоянии
-
-        # 2. Получаем полную информацию о канале
+        # !!! ВРЕМЕННО ОТКЛЮЧЕНО: ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА И ВЛАДЕЛЬЦА !!!
+        
+        # chat_member = await bot.get_chat_member(chat_id=channel_username, user_id=bot.id)
+        # if chat_member.status != ChatMemberStatus.ADMINISTRATOR:
+        #     await message.answer(
+        #         f"❌ Бот не является администратором в канале {channel_username}. "
+        #         "Пожалуйста, сделайте бота администратором и повторите."
+        #     )
+        #     return
+        
+        # Получаем полную информацию о канале
         chat = await bot.get_chat(chat_id=channel_username)
         channel_id = chat.id
         
-        # 3. Проверка, что владелец сообщения (пользователь) является владельцем канала
-        owner_member = await bot.get_chat_member(chat_id=channel_username, user_id=user_id)
-        if owner_member.status not in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
-            await message.answer("❌ Вы не являетесь владельцем или администратором этого канала.")
-            return # Остаемся в состоянии
-
+        # owner_member = await bot.get_chat_member(chat_id=channel_username, user_id=user_id)
+        # if owner_member.status not in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
+        #     await message.answer("❌ Вы не являетесь владельцем или администратором этого канала.")
+        #     return
+        
         # 4. Сохранение в БД
         await db.add_channel(user_id, channel_id, channel_username, chat.title)
         
@@ -194,11 +192,10 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await message.answer(
             f"✅ Канал <b>{chat.title}</b> ({channel_username}) успешно зарегистрирован!\n\n"
             "Сейчас мы найдем вам первый канал для взаимной подписки...",
-            reply_markup=None # Убираем клавиатуру FSM
+            reply_markup=None
         )
 
-        # 7. !!! АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА !!!
-        # Генерируем фиктивный CallbackQuery для вызова логики обмена
+        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА
         await start_exchange_process(
             types.CallbackQuery(
                 id="dummy_id", 
@@ -208,35 +205,37 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             )
         )
 
-
     # --- УЛУЧШЕННАЯ ОБРАБОТКА ОШИБОК ---
     except TelegramBadRequest as e:
         logger.error(f"TelegramBadRequest в process_channel_link (link: {link}): {e}")
         await message.answer(
-            "❌ Не удалось найти канал по этой ссылке, или нет прав. Убедитесь, что канал **публичный** "
-            "и бот является его администратором с правом приглашения."
+            "❌ Не удалось найти канал по этой ссылке. Убедитесь, что канал **публичный** "
+            "и ссылка верна." # Убрали упоминание администратора, т.к. проверка отключена
         )
         # Остаемся в состоянии для повтора
     
     except Exception as e:
         logger.error(f"Неизвестная ошибка в process_channel_link (link: {link}): {e}")
         await message.answer("Произошла неизвестная ошибка при регистрации канала. Попробуйте снова.")
-        # Остаемся в состоянии для повтора
         
 # --- Логика обмена ---
 
 @dp.callback_query(F.data == "start_exchange")
-# !!! ИСПРАВЛЕНИЕ: Добавлен необязательный аргумент callback для возможности вызова из FSM !!!
 async def start_exchange_process(callback: types.CallbackQuery): 
-    # Если callback пришел из FSM, то message.message - это None, используем message.message.answer()
-    # Если callback пришел с кнопки, используем callback.message.edit_text()
-    message_to_edit = callback.message if isinstance(callback, types.CallbackQuery) else callback
+    
+    # Определяем, откуда пришел вызов (из FSM или с кнопки)
+    if isinstance(callback, types.CallbackQuery):
+        message_to_edit = callback.message
+        user_id = callback.from_user.id
+    else:
+        message_to_edit = callback # Это Message из FSM
+        user_id = callback.from_user.id
+
     user_id = callback.from_user.id
     
     # 1. Проверяем, зарегистрирован ли его канал
     user_channel_info = await db.get_user_channel_info(user_id)
     if not user_channel_info:
-        # !!! ИСПРАВЛЕНИЕ: Используем message_to_edit для ответа/редактирования !!!
         if isinstance(callback, types.CallbackQuery):
             await message_to_edit.edit_text(
                 "⚠️ **Ваш канал не зарегистрирован.**\n\n"
@@ -258,7 +257,6 @@ async def start_exchange_process(callback: types.CallbackQuery):
     if target_channel_info:
         target_channel_id, target_channel_link, target_channel_title = target_channel_info
         
-        # !!! ИСПРАВЛЕНИЕ: Используем message_to_edit для редактирования !!!
         await message_to_edit.edit_text(
             f"✨ **Обмен Подписками**\n\n"
             f"**1. Подпишитесь на этот канал:**\n"
@@ -269,7 +267,6 @@ async def start_exchange_process(callback: types.CallbackQuery):
         )
         
     else:
-        # !!! ИСПРАВЛЕНИЕ: Используем message_to_edit для редактирования !!!
         await message_to_edit.edit_text(
             "😴 **Нет доступных каналов для обмена.**\n\n"
             "Все долги на данный момент закрыты. Ваш канал остается в очереди (баланс: 0). "
