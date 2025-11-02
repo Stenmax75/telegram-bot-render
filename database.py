@@ -1,7 +1,6 @@
-# database.py (Исправлен для aiomysql с поддержкой SSL через ssl.SSLContext)
+# database.py (ВРЕМЕННАЯ ВЕРСИЯ С ИЗМЕНЕНИЕМ ЛОГИКИ ПОИСКА КАНАЛА ДЛЯ ТЕСТИРОВАНИЯ)
 import aiomysql
 import logging
-# !!! ДОБАВЛЕН ИМПОРТ !!!
 import ssl 
 from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT
 
@@ -21,12 +20,9 @@ class Database:
             
         try:
             # --- ИСПРАВЛЕНИЕ: Создание SSL-контекста вручную вместо передачи словаря ---
-            # Это устраняет ошибку 'dict' object has no attribute 'wrap_bio'
             ssl_context = ssl.create_default_context(
-                # Указываем путь к файлу сертификата
                 cafile='ca.pem'
             )
-            # Требуем строгую проверку подлинности сервера, соответствующую 'verify_identity': True
             ssl_context.check_hostname = True 
             ssl_context.verify_mode = ssl.CERT_REQUIRED
             # --------------------------------------------------------------------------
@@ -40,9 +36,7 @@ class Database:
                 autocommit=True, 
                 minsize=1,
                 maxsize=10,
-                # --- ИСПРАВЛЕНО: Теперь передаем объект контекста ---
                 ssl=ssl_context # <<< Передаем объект SSLContext
-                # ---------------------------------------------------
             )
             logger.info("База данных: Пул подключений к MySQL успешно создан.")
             await self._create_tables()
@@ -149,16 +143,22 @@ class Database:
         )
 
     async def get_target_channel(self, user_id: int):
-        """Получение канала для подписки."""
+        """
+        Получение канала для подписки.
+        
+        !!! ВРЕМЕННОЕ ИЗМЕНЕНИЕ ДЛЯ ТЕСТИРОВАНИЯ !!!
+        Условие поиска изменено на 'subscribers_needed >= 0' 
+        (чтобы найти канал, даже если он не имеет активного долга).
+        """
         row = await self._fetchrow(
             """
             SELECT c.channel_id, c.link, c.title
             FROM channels c
             LEFT JOIN subscriptions s ON c.channel_id = s.subscribed_channel_id AND s.subscriber_user_id = %s AND s.is_active = TRUE
-            WHERE c.owner_id != %s 
-              AND c.subscribers_needed > 0 
-              AND s.subscriber_user_id IS NULL 
-            ORDER BY c.subscribers_needed DESC 
+            WHERE c.owner_id != %s 
+              AND c.subscribers_needed >= 0 -- <--- ИЗМЕНЕНИЕ ЗДЕСЬ
+              AND s.subscriber_user_id IS NULL 
+            ORDER BY c.subscribers_needed ASC, RAND() -- Выбираем сначала каналы с наименьшим долгом (0)
             LIMIT 1
             """,
             user_id, user_id
@@ -192,7 +192,7 @@ class Database:
             async with conn.cursor() as cur:
                 await cur.execute("START TRANSACTION")
                 try:
-                    # 1. Увеличение счетчика для Канала Б
+                    # 1. Увеличение счетчика для Канала, который должен получить подписку взамен (Канал А)
                     await cur.execute(
                         """UPDATE channels 
                            SET subscribers_needed = subscribers_needed + 1 
@@ -219,7 +219,7 @@ class Database:
             async with conn.cursor() as cur:
                 await cur.execute("START TRANSACTION")
                 try:
-                    # 1. Уменьшение счетчика для Канала Б
+                    # 1. Уменьшение счетчика для Канала, который получает подписку (Канал, которому должны)
                     await cur.execute(
                         """UPDATE channels 
                            SET subscribers_needed = subscribers_needed - 1 
