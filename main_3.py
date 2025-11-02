@@ -1,4 +1,4 @@
-# main_3.py (ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ БЕЗ ПРОВЕРОК + ИСПРАВЛЕНИЕ ОШИБКИ FSM/CALLBACK + ИСПРАВЛЕНИЕ ОШИБКИ URL)
+# main_3.py (ФИНАЛЬНАЯ ТЕСТОВАЯ ВЕРСИЯ С ИСПРАВЛЕНИЕМ УВЕДОМЛЕНИЙ И URL)
 
 import asyncio
 import logging
@@ -15,7 +15,7 @@ from aiogram.filters import Command
 
 # Импорт конфигурации и базы данных
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
-from database import db # Предполагается, что ваш database.py обновлен
+from database import db 
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +79,7 @@ def get_join_main_channel_keyboard():
     return builder.as_markup()
 
 def get_subscription_keyboard(channel_link: str, channel_id: int):
-    """Кнопки для подписки на целевой канал. ИСПРАВЛЕН URL."""
+    """Кнопки для подписки на целевой канал."""
     builder = InlineKeyboardBuilder()
     # ИСПРАВЛЕНИЕ: Преобразуем ссылку в валидный URL
     valid_url = format_link_for_button(channel_link) 
@@ -154,7 +154,7 @@ async def register_channel_start(callback: types.CallbackQuery, state: FSMContex
     await callback.message.edit_text(
         "📝 **Регистрация канала**\n\n"
         "Отправьте мне публичную ссылку на ваш Telegram-канал (например, `@channel_name` или `https://t.me/channel_name`).\n\n"
-        "**Важно:** Бот должен быть **администратором** вашего канала (право **приглашения пользователей**).", # Оставил упоминание
+        "**Важно:** Бот должен быть **администратором** вашего канала (право **приглашения пользователей**).",
         reply_markup=None
     )
     await callback.answer()
@@ -206,7 +206,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         logger.error(f"Неизвестная ошибка в process_channel_link (link: {link}): {e}")
         await message.answer("Произошла неизвестная ошибка при регистрации канала. Попробуйте снова.")
         
-# -------------------------- ЛОГИКА ОБМЕНА (ИСПРАВЛЕНА) --------------------------
+# -------------------------- ЛОГИКА ОБМЕНА --------------------------
 
 @dp.callback_query(F.data == "start_exchange")
 async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Message]): 
@@ -257,7 +257,6 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
             f"Канал: **{target_channel_title}**\n"
             f"Ссылка: `{target_channel_link}`\n\n"
             "Это **обязательное** условие для получения подписчика взамен. После подписки нажмите 'Подписка оформлена'.",
-            # ИСПОЛЬЗУЕМ ИСПРАВЛЕННУЮ ФУНКЦИЮ
             reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id) 
         )
         
@@ -272,7 +271,7 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
     if is_callback:
         await update_obj.answer()
 
-# -------------------------- ОСТАЛЬНЫЕ ХЕНДЛЕРЫ БЕЗ ИЗМЕНЕНИЙ --------------------------
+# -------------------------- ПОДТВЕРЖДЕНИЕ ПОДПИСКИ (ОСНОВНОЕ ИЗМЕНЕНИЕ) --------------------------
 
 @dp.callback_query(F.data.startswith("sub_done:"))
 async def process_subscription_done(callback: types.CallbackQuery):
@@ -290,9 +289,21 @@ async def process_subscription_done(callback: types.CallbackQuery):
         await callback.answer("Ошибка: Ваш канал не найден. Начните с /start.")
         return
 
-    subscriber_channel_id = user_channel_info[0] # ID канала A
+    subscriber_channel_id = user_channel_info[0]    # ID канала A (Ваш канал)
+    subscriber_channel_link = user_channel_info[1]  # Ссылка на Ваш канал
+    subscriber_channel_title = user_channel_info[2] # Название Вашего канала
+    
+    # 3. Находим Владельца канала B (на который только что подписались)
+    channel_b_owner_info = await db.get_channel_owner_info(subscribed_channel_id)
+    if not channel_b_owner_info:
+        logger.error(f"Не найден владелец для канала ID: {subscribed_channel_id}")
+        await callback.answer("Ошибка системы: не найден владелец канала B.")
+        return
+        
+    channel_b_owner_id = channel_b_owner_info[0]    # ID владельца канала B
+    channel_b_title = channel_b_owner_info[1]       # Название канала B
 
-    # 3. Регистрируем подписку и создаем "долг" для Channel A (Транзакция в database.py)
+    # 4. Регистрируем подписку и создаем "долг" для Channel A (Транзакция в database.py)
     try:
         await db.register_subscription_and_create_debt(
             subscriber_user_id=user_id, 
@@ -300,10 +311,31 @@ async def process_subscription_done(callback: types.CallbackQuery):
             subscriber_channel_id=subscriber_channel_id # Канал A
         )
         
-        # 4. Уведомление об успехе
+        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B (НОВОЕ: О взаимной подписке)
+        try:
+            # Создаем кнопку для взаимной подписки на канал A (Канал пользователя, который только что подписался)
+            builder = InlineKeyboardBuilder()
+            valid_url_a = format_link_for_button(subscriber_channel_link) 
+            builder.button(text=f"✅ Подписаться на {subscriber_channel_title}", url=valid_url_a)
+            builder.adjust(1)
+            
+            await bot.send_message(
+                chat_id=channel_b_owner_id,
+                text=(
+                    f"🎉 **НОВАЯ ВЗАИМНАЯ ПОДПИСКА!**\n\n"
+                    f"На ваш канал **{channel_b_title}** только что подписался новый пользователь.\n\n"
+                    f"**Ваш следующий шаг:**\n"
+                    f"Чтобы завершить обмен, пожалуйста, **подпишитесь взаимно** на канал Пользователя A:"
+                ),
+                reply_markup=builder.as_markup()
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}): {e}")
+        
+        # 6. Уведомление Пользователя А (уже было)
         await callback.message.edit_text(
             "🎉 **Подписка засчитана!**\n\n"
-            f"Ваш канал **{user_channel_info[2]}** добавлен в очередь. "
+            f"Ваш канал **{subscriber_channel_title}** добавлен в очередь. "
             "Вы получите уведомление, как только на него подпишется другой пользователь.",
             reply_markup=get_main_keyboard(is_registered=True)
         )
