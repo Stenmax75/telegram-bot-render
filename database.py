@@ -140,7 +140,8 @@ class Database:
             channel_id, owner_id, link, title
         )
 
-            async def get_target_channel(self, user_id: int):
+    # --- ИСПРАВЛЕННЫЙ БЛОК, ГДЕ БЫЛА ОШИБКА ОТСТУПА ---
+    async def get_target_channel(self, user_id: int):
         """
         Получение канала для подписки. 
         ВРЕМЕННОЕ ИЗМЕНЕНИЕ: subscribers_needed >= 0 для тестирования.
@@ -157,9 +158,8 @@ class Database:
         """
         row = await self._fetchrow(query, user_id, user_id)
         return row
+    # --------------------------------------------------
 
-
-        
     async def get_channel_owner_info(self, channel_id: int):
         """Получить информацию о владельце канала."""
         row = await self._fetchrow(
@@ -245,5 +245,3 @@ class Database:
                     raise
 
 db = Database()
-
-
