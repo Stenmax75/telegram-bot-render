@@ -140,13 +140,12 @@ class Database:
             channel_id, owner_id, link, title
         )
 
-        async def get_target_channel(self, user_id: int):
+            async def get_target_channel(self, user_id: int):
         """
         Получение канала для подписки. 
         ВРЕМЕННОЕ ИЗМЕНЕНИЕ: subscribers_needed >= 0 для тестирования.
         """
-        row = await self._fetchrow(
-            """
+        query = """
             SELECT c.channel_id, c.link, c.title
             FROM channels c
             LEFT JOIN subscriptions s ON c.channel_id = s.subscribed_channel_id AND s.subscriber_user_id = %s AND s.is_active = TRUE
@@ -155,10 +154,10 @@ class Database:
               AND s.subscriber_user_id IS NULL
             ORDER BY c.subscribers_needed ASC, RAND()
             LIMIT 1
-            """,
-            user_id, user_id
-        )
+        """
+        row = await self._fetchrow(query, user_id, user_id)
         return row
+
 
         
     async def get_channel_owner_info(self, channel_id: int):
@@ -246,4 +245,5 @@ class Database:
                     raise
 
 db = Database()
+
 
