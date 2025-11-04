@@ -97,6 +97,12 @@ class Database:
                 FOREIGN KEY (owner_id) REFERENCES users(user_id) ON DELETE CASCADE
             ) ENGINE=InnoDB;
         """)
+        
+        # ДОБАВЛЕНИЕ КОЛОНКИ queue_join_time (Если её еще нет)
+        await self._execute("""
+            ALTER TABLE channels 
+            ADD COLUMN IF NOT EXISTS queue_join_time DATETIME DEFAULT CURRENT_TIMESTAMP;
+        """)
 
         await self._execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -140,7 +146,6 @@ class Database:
             channel_id, owner_id, link, title
         )
 
-    # --- ИСПРАВЛЕННЫЙ БЛОК, ГДЕ БЫЛА ОШИБКА ОТСТУПА ---
     async def get_target_channel(self, user_id: int):
         """
         Получение канала для подписки с приоритетом по долгу и времени ожидания.
@@ -158,7 +163,6 @@ class Database:
         """
         row = await self._fetchrow(query, user_id, user_id)
         return row
-    # --------------------------------------------------
 
     async def get_channel_owner_info(self, channel_id: int):
         """Получить информацию о владельце канала."""
@@ -181,16 +185,17 @@ class Database:
         subscribed_channel_id: int, 
         subscriber_channel_id: int
     ):
-        """Регистрирует подписку и увеличивает счетчик (создание долга)."""
+        """Регистрирует подписку и увеличивает счетчик (создание долга) и обновляет время очереди."""
         async with self.pool.acquire() as conn:
             # MySQL транзакция
             async with conn.cursor() as cur:
                 await cur.execute("START TRANSACTION")
                 try:
-                    # 1. Увеличение счетчика для Канала, который должен получить подписку взамен (Канал А)
+                    # 1. Увеличение счетчика и обновление queue_join_time
                     await cur.execute(
                         """UPDATE channels 
-                           SET subscribers_needed = subscribers_needed + 1 
+                           SET subscribers_needed = subscribers_needed + 1,
+                               queue_join_time = NOW()
                            WHERE channel_id = %s""",
                         (subscriber_channel_id,)
                     )
@@ -245,4 +250,3 @@ class Database:
                     raise
 
 db = Database()
-
