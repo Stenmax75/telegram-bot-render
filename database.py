@@ -143,7 +143,7 @@ class Database:
     # --- ИСПРАВЛЕННЫЙ БЛОК, ГДЕ БЫЛА ОШИБКА ОТСТУПА ---
     async def get_target_channel(self, user_id: int):
         """
-        Получение канала для подписки. 
+        Получение канала для подписки с приоритетом по долгу и времени ожидания.
         ВРЕМЕННОЕ ИЗМЕНЕНИЕ: subscribers_needed >= 0 для тестирования.
         """
         query = """
@@ -153,7 +153,7 @@ class Database:
             WHERE c.owner_id != %s
               AND c.subscribers_needed >= 0 
               AND s.subscriber_user_id IS NULL
-            ORDER BY c.subscribers_needed ASC, RAND()
+            ORDER BY c.subscribers_needed ASC, c.queue_join_time ASC, RAND()
             LIMIT 1
         """
         row = await self._fetchrow(query, user_id, user_id)
@@ -245,3 +245,4 @@ class Database:
                     raise
 
 db = Database()
+
