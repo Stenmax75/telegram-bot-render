@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-import os # <-- Добавлен для чтения REDIS_DSN
+import os
 from typing import Union
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
@@ -14,7 +14,7 @@ from aiogram.filters import Command
 
 # НОВЫЕ ИМПОРТЫ ДЛЯ REDIS
 from aiogram.fsm.storage.redis import RedisStorage, Redis
-from aiogram.fsm.storage.memory import MemoryStorage # На случай, если Redis недоступен
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # Импорт конфигурации и базы данных
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
@@ -313,11 +313,12 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
     if is_callback:
         await update_obj.answer()
 
-# -------------------------- ПОДТВЕРЖДЕНИЕ ПОДПИСКИ (ОСНОВНОЕ ИЗМЕНЕНИЕ) --------------------------
+# -------------------------- ПОДТВЕРЖДЕНИЕ ПОДПИСКИ (С НОВЫМ УВЕДОМЛЕНИЕМ) --------------------------
 
 @dp.callback_query(F.data.startswith("sub_done:"))
 async def process_subscription_done(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    username_a = callback.from_user.username or f"id{user_id}" # <--- Получаем Username Пользователя А
     subscribed_channel_id = int(callback.data.split(":")[1])
     
     # 1. Проверяем, действительно ли пользователь подписался на Channel B
@@ -353,7 +354,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
             subscriber_channel_id=subscriber_channel_id # Канал A
         )
         
-        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B
+        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B (УЛУЧШЕНО)
         try:
             # Создаем кнопку для взаимной подписки на канал A
             builder = InlineKeyboardBuilder()
@@ -361,11 +362,15 @@ async def process_subscription_done(callback: types.CallbackQuery):
             builder.button(text=f"✅ Подписаться на {subscriber_channel_title}", url=valid_url_a)
             builder.adjust(1)
             
+            # --- НОВЫЙ ТЕКСТ УВЕДОМЛЕНИЯ ---
             await bot.send_message(
                 chat_id=channel_b_owner_id,
                 text=(
                     f"🎉 **НОВАЯ ВЗАИМНАЯ ПОДПИСКА!**\n\n"
-                    f"На ваш канал **{channel_b_title}** только что подписался новый пользователь.\n\n"
+                    f"На ваш канал **{channel_b_title}** только что **подписался** пользователь "
+                    f"(`@{username_a}` или ID: `{user_id}`).\n\n"
+                    f"Владелец канала, который подписался:\n"
+                    f"**{subscriber_channel_title}** (`{subscriber_channel_link}`)\n\n"
                     f"**Ваш следующий шаг:**\n"
                     f"Чтобы завершить обмен, пожалуйста, **подпишитесь взаимно** на канал Пользователя A:"
                 ),
@@ -374,7 +379,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
         except Exception as e:
             logger.error(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}): {e}")
         
-        # 6. Уведомление Пользователя А
+        # 6. Уведомление Пользователя А (Без изменений, просто подтверждение)
         await callback.message.edit_text(
             "🎉 **Подписка засчитана!**\n\n"
             f"Ваш канал **{subscriber_channel_title}** добавлен в очередь. "
