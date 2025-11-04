@@ -1,5 +1,3 @@
-# main_3.py (ФИНАЛЬНАЯ ТЕСТОВАЯ ВЕРСИЯ С ИСПРАВЛЕНИЕМ УВЕДОМЛЕНИЙ И URL)
-
 import asyncio
 import logging
 import re
@@ -163,6 +161,11 @@ async def register_channel_start(callback: types.CallbackQuery, state: FSMContex
 async def process_channel_link(message: types.Message, state: FSMContext):
     link = message.text.strip()
     user_id = message.from_user.id
+
+    # ИСПРАВЛЕНИЕ: Защита от случайной команды или текста, который не является ссылкой
+    if message.text.startswith('/'):
+        await message.answer("❌ Вы находитесь в режиме регистрации канала. Отправьте, пожалуйста, только ссылку.")
+        return
     
     # Извлечение username из ссылки
     match = re.search(r"@(\w+)|t\.me/(\w+)", link, re.IGNORECASE)
@@ -173,39 +176,59 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     channel_username = '@' + (match.group(1) or match.group(2))
     
     try:
-        # !!! ВРЕМЕННО ОТКЛЮЧЕНО: ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА И ВЛАДЕЛЬЦА !!!
-        
-        # Получаем полную информацию о канале
+        # !!! ПРОВЕРКА АДМИНИСТРАТОРА (ДОЛЖНА БЫТЬ ВОССТАНОВЛЕНА, КОГДА БУДЕТ ВРЕМЯ) !!!
+        # Пока полагаемся на то, что бот может получить chat info, что обычно требует публичного канала
+
+        # 1. Получаем полную информацию о канале
         chat = await bot.get_chat(chat_id=channel_username)
         channel_id = chat.id
         
-        # 4. Сохранение в БД
+        # 2. Сохранение в БД
         await db.add_channel(user_id, channel_id, channel_username, chat.title)
         
-        # 5. Успех: Отправляем ответ и ВЫХОДИМ ИЗ СОСТОЯНИЯ
+        # 3. Успех: Отправляем ответ и ВЫХОДИМ ИЗ СОСТОЯНИЯ
         await state.clear()
         
-        # 6. Уведомление об успешной регистрации
+        # 4. Уведомление об успешной регистрации
         await message.answer(
             f"✅ Канал <b>{chat.title}</b> ({channel_username}) успешно зарегистрирован!\n\n"
             "Сейчас мы найдем вам первый канал для взаимной подписки...",
             reply_markup=None
         )
 
-        # 7. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА
+        # 5. АВТОМАТИЧЕСКИЙ ЗАПУСК ОБМЕНА
+        # ИСПРАВЛЕНИЕ: Автоматический запуск, как и требовалось
         await start_exchange_process(message) 
 
     # --- УЛУЧШЕННАЯ ОБРАБОТКА ОШИБОК ---
     except TelegramBadRequest as e:
         logger.error(f"TelegramBadRequest в process_channel_link (link: {link}): {e}")
+        # ИСПРАВЛЕНИЕ: Более детальная ошибка для отладки
         await message.answer(
-            "❌ Не удалось найти канал по этой ссылке. Убедитесь, что канал **публичный** "
-            "и ссылка верна." 
+            f"❌ Telegram API Ошибка: {e}. Убедитесь, что канал **публичный** "
+            "и ссылка верна, а бот **добавлен как администратор**." 
         )
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка в process_channel_link (link: {link}): {e}")
-        await message.answer("Произошла неизвестная ошибка при регистрации канала. Попробуйте снова.")
         
+    except Exception as e:
+        logger.error(f"Критическая ошибка в process_channel_link (link: {link}): {e}")
+        # ИСПРАВЛЕНИЕ: Вывод подробной ошибки
+        await message.answer(f"Произошла критическая ошибка: {e}. Попробуйте снова.")
+
+# --- Дополнительный хендлер для диагностики необработанных сообщений (ВРЕМЕННО) ---
+@dp.message()
+async def unhandled_message(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    logger.warning(f"Необработанное сообщение от {message.from_user.id}: {message.text}, State: {current_state}")
+    # Этот хендлер будет ловить сообщения, когда FSM неактивен (current_state=None) или состояние потеряно
+    if current_state:
+        await message.answer(
+            f"Вы находитесь в состоянии {current_state}. Пожалуйста, следуйте инструкциям или нажмите /start для сброса."
+        )
+    else:
+        await message.answer(
+            "Я не знаю, что делать с этим сообщением. Начните с команды /start."
+        )
+
 # -------------------------- ЛОГИКА ОБМЕНА --------------------------
 
 @dp.callback_query(F.data == "start_exchange")
@@ -311,9 +334,9 @@ async def process_subscription_done(callback: types.CallbackQuery):
             subscriber_channel_id=subscriber_channel_id # Канал A
         )
         
-        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B (НОВОЕ: О взаимной подписке)
+        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B
         try:
-            # Создаем кнопку для взаимной подписки на канал A (Канал пользователя, который только что подписался)
+            # Создаем кнопку для взаимной подписки на канал A
             builder = InlineKeyboardBuilder()
             valid_url_a = format_link_for_button(subscriber_channel_link) 
             builder.button(text=f"✅ Подписаться на {subscriber_channel_title}", url=valid_url_a)
@@ -332,7 +355,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
         except Exception as e:
             logger.error(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}): {e}")
         
-        # 6. Уведомление Пользователя А (уже было)
+        # 6. Уведомление Пользователя А
         await callback.message.edit_text(
             "🎉 **Подписка засчитана!**\n\n"
             f"Ваш канал **{subscriber_channel_title}** добавлен в очередь. "
