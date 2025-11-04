@@ -7,3 +7,6 @@ aiomysql
 fastapi
 gunicorn
 uvicorn
+aiogram[redis]
+redis
+
