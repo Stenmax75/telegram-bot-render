@@ -298,7 +298,7 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
             f"**1. Подпишитесь на этот канал:**\n"
             f"Канал: **{target_channel_title}**\n"
             f"Ссылка: `{target_channel_link}`\n\n"
-            "Это **обязательное** условие для получения подписчика взамен. После подписки нажмите 'Подписка оформлена'.",
+            f"Это **обязательное** условие для получения подписчика взамен. После подписки нажмите 'Подписка оформлена'.",
             reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id) 
         )
         
@@ -364,9 +364,9 @@ async def process_subscription_done(callback: types.CallbackQuery):
             builder.button(text=f"1️⃣ Подписаться на {subscriber_channel_title}", url=valid_url_a)
             
             # Кнопка 2: Подтверждение взаимной подписки (КОЛБЭК)
-            # Формат: confirm_reciprocal_sub:id_владельца_A:id_канала_B
-            # Мы передаем ID Владельца канала А, чтобы потом его уведомить
-            callback_data = f"confirm_reciprocal_sub:{owner_b_id}:{subscriber_channel_id}" 
+            # Формат: confirm_reciprocal_sub:id_владельца_B:id_канала_A
+            # Владелец B нажимает, чтобы уведомить владельца A
+            callback_data = f"confirm_reciprocal_sub:{channel_b_owner_id}:{subscriber_channel_id}" 
             builder.button(text="2️⃣ Я подписался взаимно", callback_data=callback_data)
             
             builder.adjust(1)
@@ -382,7 +382,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
                     f"**{subscriber_channel_title}** (`{subscriber_channel_link}`)\n\n"
                     f"**Ваш следующий шаг:**\n"
                     f"1. **Подпишитесь** на канал Пользователя A.\n"
-                    f"2. **Нажмите 'Я подписался взаимно'** для отправки ему подтверждения."
+                    f"2. **Нажмите 'Я подписался взаимно'** для завершения обмена."
                 ),
                 reply_markup=builder.as_markup()
             )
@@ -408,56 +408,78 @@ async def process_subscription_done(callback: types.CallbackQuery):
 async def process_reciprocal_subscription(callback: types.CallbackQuery):
     # Данные: confirm_reciprocal_sub:id_владельца_B:id_канала_A
     # owner_b_id = владелец канала B (тот, кто нажал кнопку)
-    # subscriber_channel_a_id = Канал A (который должен получить подтверждение)
+    # channel_that_owes_id = Канал A (который должен получить подтверждение и погасить долг)
     
+    user_id_b = callback.from_user.id # Пользователь, который нажал кнопку (Владелец B)
+
     parts = callback.data.split(":")
     if len(parts) != 3:
         await callback.answer("Ошибка данных колбэка.")
         return
 
-    owner_b_id = int(parts[1])           
-    subscriber_channel_a_id = int(parts[2]) 
+    owner_b_id = int(parts[1])              # ID владельца Канала B
+    channel_that_owes_id = int(parts[2])    # ID Канала A (который получил долг на шаге sub_done)
 
-    # 1. Получаем информацию о канале B (для уведомления владельца A)
-    # Нам нужен TITLE канала B.
+    # 1. Проверяем, действительно ли Владелец B подписался на Канал A
+    if not await is_member(user_id_b, channel_that_owes_id):
+        await callback.answer("❌ Мы не видим вашей подписки на целевой канал. Пожалуйста, подпишитесь.")
+        return
+        
+    # 2. Получаем информацию о канале B (для уведомления владельца A)
+    # channel_b_id, channel_b_link, channel_b_title, subs_needed
     channel_b_info_from_owner = await db.get_channel_info_by_owner_id(owner_b_id)
     if not channel_b_info_from_owner:
-         logger.error(f"Не найдена информация о канале B по ID владельца: {owner_b_id}")
-         await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
-         return
+          logger.error(f"Не найдена информация о канале B по ID владельца: {owner_b_id}")
+          await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
+          return
     
-    # channel_b_id, channel_b_link, channel_b_title, subs_needed
+    channel_b_id = channel_b_info_from_owner[0]
     channel_b_title = channel_b_info_from_owner[2] 
     
-    # 2. Получаем ID владельца канала A (которого нужно уведомить)
-    owner_a_info = await db.get_channel_owner_info(subscriber_channel_a_id)
+    # 3. Получаем ID владельца канала A (которого нужно уведомить)
+    owner_a_info = await db.get_channel_owner_info(channel_that_owes_id)
     if not owner_a_info:
         await callback.answer("Ошибка: Не найден владелец канала A.")
         return
     
-    owner_a_id = owner_a_info[0] # ID владельца канала A
+    owner_a_id = owner_a_info[0] # ID владельца канала A (получает уведомление)
+    channel_a_title = owner_a_info[1] # Название канала A (для уведомления)
 
-    # 3. Отправляем финальное уведомление Владельцу Канала А
+    # 4. Транзакция: Регистрируем подписку (Владелец B на Канал A) и погашаем долг Канала A
+    try:
+        new_subs_needed = await db.fulfill_debt(
+            subscriber_user_id=user_id_b,
+            subscribed_channel_id=channel_that_owes_id,
+            channel_that_owes_id=channel_that_owes_id # Канал A сам себе должен и сам погашает
+        )
+    except Exception as e:
+        logger.error(f"Ошибка транзакции fulfill_debt: {e}")
+        await callback.answer("❌ Ошибка при погашении долга. Попробуйте снова.")
+        return
+
+    # 5. Отправляем финальное уведомление Владельцу Канала А
     try:
         await bot.send_message(
             chat_id=owner_a_id,
             text=(
-                f"✅ **ВЗАИМНАЯ ПОДПИСКА УСПЕШНА!**\n\n"
-                f"Владелец канала **{channel_b_title}** только что **подтвердил**, что подписался на ваш канал."
-            )
+                f"🎉 **ВЗАИМНАЯ ПОДПИСКА УСПЕШНА!**\n\n"
+                f"На ваш канал **{channel_a_title}** только что **подписался** пользователь (Владелец канала B: **{channel_b_title}**).\n\n"
+                f"Ваш текущий баланс долга: **{new_subs_needed}**."
+            ),
+            reply_markup=get_main_keyboard(is_registered=True)
         )
         
-        # 4. Обновляем сообщение для Владельца B (указываем, что действие выполнено)
+        # 6. Обновляем сообщение для Владельца B (указываем, что действие выполнено)
         await callback.message.edit_text(
             f"👍 **Подтверждение отправлено!**\n\n"
-            f"Вы успешно завершили взаимную подписку на канал **{channel_b_title}**. Спасибо!"
+            f"Вы успешно завершили взаимную подписку на канал **{channel_a_title}**."
         )
 
     except Exception as e:
         logger.error(f"Не удалось отправить уведомление Владельцу A ({owner_a_id}): {e}")
         await callback.message.edit_text("❌ Произошла ошибка при отправке финального уведомления.")
 
-    await callback.answer()
+    await callback.answer("Подписка подтверждена. Долг погашен.")
 
 # --- Статистика канала ---
 
