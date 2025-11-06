@@ -313,12 +313,12 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
     if is_callback:
         await update_obj.answer()
 
-# -------------------------- ПОДТВЕРЖДЕНИЕ ПОДПИСКИ (С НОВЫМ УВЕДОМЛЕНИЕМ) --------------------------
+# -------------------------- ПОДТВЕРЖДЕНИЕ ПОДПИСКИ (ОСНОВНОЕ ИЗМЕНЕНИЕ) --------------------------
 
 @dp.callback_query(F.data.startswith("sub_done:"))
 async def process_subscription_done(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    username_a = callback.from_user.username or f"id{user_id}" # <--- Получаем Username Пользователя А
+    username_a = callback.from_user.username or f"id{user_id}" 
     subscribed_channel_id = int(callback.data.split(":")[1])
     
     # 1. Проверяем, действительно ли пользователь подписался на Channel B
@@ -354,15 +354,24 @@ async def process_subscription_done(callback: types.CallbackQuery):
             subscriber_channel_id=subscriber_channel_id # Канал A
         )
         
-        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B (УЛУЧШЕНО)
+        # 5. УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА КАНАЛА B (С НОВЫМИ КНОПКАМИ)
         try:
-            # Создаем кнопку для взаимной подписки на канал A
+            # Создаем кнопки для взаимной подписки на канал A
             builder = InlineKeyboardBuilder()
             valid_url_a = format_link_for_button(subscriber_channel_link) 
-            builder.button(text=f"✅ Подписаться на {subscriber_channel_title}", url=valid_url_a)
+            
+            # Кнопка 1: Ссылка на канал (URL)
+            builder.button(text=f"1️⃣ Подписаться на {subscriber_channel_title}", url=valid_url_a)
+            
+            # Кнопка 2: Подтверждение взаимной подписки (КОЛБЭК)
+            # Формат: confirm_reciprocal_sub:id_владельца_A:id_канала_B
+            # Мы передаем ID Владельца канала А, чтобы потом его уведомить
+            callback_data = f"confirm_reciprocal_sub:{owner_b_id}:{subscriber_channel_id}" 
+            builder.button(text="2️⃣ Я подписался взаимно", callback_data=callback_data)
+            
             builder.adjust(1)
             
-            # --- НОВЫЙ ТЕКСТ УВЕДОМЛЕНИЯ ---
+            # --- ТЕКСТ УВЕДОМЛЕНИЯ ---
             await bot.send_message(
                 chat_id=channel_b_owner_id,
                 text=(
@@ -372,14 +381,15 @@ async def process_subscription_done(callback: types.CallbackQuery):
                     f"Владелец канала, который подписался:\n"
                     f"**{subscriber_channel_title}** (`{subscriber_channel_link}`)\n\n"
                     f"**Ваш следующий шаг:**\n"
-                    f"Чтобы завершить обмен, пожалуйста, **подпишитесь взаимно** на канал Пользователя A:"
+                    f"1. **Подпишитесь** на канал Пользователя A.\n"
+                    f"2. **Нажмите 'Я подписался взаимно'** для отправки ему подтверждения."
                 ),
                 reply_markup=builder.as_markup()
             )
         except Exception as e:
             logger.error(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}): {e}")
         
-        # 6. Уведомление Пользователя А (Без изменений, просто подтверждение)
+        # 6. Уведомление Пользователя А (Без изменений)
         await callback.message.edit_text(
             "🎉 **Подписка засчитана!**\n\n"
             f"Ваш канал **{subscriber_channel_title}** добавлен в очередь. "
@@ -391,6 +401,63 @@ async def process_subscription_done(callback: types.CallbackQuery):
         logger.error(f"Ошибка транзакции при sub_done: {e}")
         await callback.answer("❌ Ошибка при регистрации транзакции. Попробуйте снова.")
 
+
+# -------------------------- НОВЫЙ ХЕНДЛЕР: ПОДТВЕРЖДЕНИЕ ВЗАИМНОЙ ПОДПИСКИ --------------------------
+
+@dp.callback_query(F.data.startswith("confirm_reciprocal_sub:"))
+async def process_reciprocal_subscription(callback: types.CallbackQuery):
+    # Данные: confirm_reciprocal_sub:id_владельца_B:id_канала_A
+    # owner_b_id = владелец канала B (тот, кто нажал кнопку)
+    # subscriber_channel_a_id = Канал A (который должен получить подтверждение)
+    
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Ошибка данных колбэка.")
+        return
+
+    owner_b_id = int(parts[1])           
+    subscriber_channel_a_id = int(parts[2]) 
+
+    # 1. Получаем информацию о канале B (для уведомления владельца A)
+    # Нам нужен TITLE канала B.
+    channel_b_info_from_owner = await db.get_channel_info_by_owner_id(owner_b_id)
+    if not channel_b_info_from_owner:
+         logger.error(f"Не найдена информация о канале B по ID владельца: {owner_b_id}")
+         await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
+         return
+    
+    # channel_b_id, channel_b_link, channel_b_title, subs_needed
+    channel_b_title = channel_b_info_from_owner[2] 
+    
+    # 2. Получаем ID владельца канала A (которого нужно уведомить)
+    owner_a_info = await db.get_channel_owner_info(subscriber_channel_a_id)
+    if not owner_a_info:
+        await callback.answer("Ошибка: Не найден владелец канала A.")
+        return
+    
+    owner_a_id = owner_a_info[0] # ID владельца канала A
+
+    # 3. Отправляем финальное уведомление Владельцу Канала А
+    try:
+        await bot.send_message(
+            chat_id=owner_a_id,
+            text=(
+                f"✅ **ВЗАИМНАЯ ПОДПИСКА УСПЕШНА!**\n\n"
+                f"Владелец канала **{channel_b_title}** только что **подтвердил**, что подписался на ваш канал."
+            )
+        )
+        
+        # 4. Обновляем сообщение для Владельца B (указываем, что действие выполнено)
+        await callback.message.edit_text(
+            f"👍 **Подтверждение отправлено!**\n\n"
+            f"Вы успешно завершили взаимную подписку на канал **{channel_b_title}**. Спасибо!"
+        )
+
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление Владельцу A ({owner_a_id}): {e}")
+        await callback.message.edit_text("❌ Произошла ошибка при отправке финального уведомления.")
+
+    await callback.answer()
 
 # --- Статистика канала ---
 
