@@ -130,11 +130,23 @@ class Database:
         )
     
     async def get_user_channel_info(self, owner_id: int):
+        """Получить ID, ссылку, название и долг канала по ID владельца."""
         row = await self._fetchrow(
             "SELECT channel_id, link, title, subscribers_needed FROM channels WHERE owner_id = %s",
             owner_id
         )
         return row
+    
+    # --- НОВАЯ ФУНКЦИЯ ДЛЯ ВЗАИМНОЙ ПОДПИСКИ ---
+    async def get_channel_info_by_owner_id(self, owner_id: int):
+        """Возвращает информацию о канале (ID, link, title) по ID владельца."""
+        # Используем ту же логику, что и в get_user_channel_info, но возвращаем нужные поля
+        row = await self._fetchrow(
+            "SELECT channel_id, link, title, subscribers_needed FROM channels WHERE owner_id = %s",
+            owner_id
+        )
+        return row
+    # --- КОНЕЦ НОВОЙ ФУНКЦИИ ---
     
     async def add_channel(self, owner_id: int, channel_id: int, link: str, title: str):
         await self.add_user(owner_id, "channel_owner_placeholder")
