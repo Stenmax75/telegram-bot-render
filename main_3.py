@@ -112,7 +112,7 @@ def get_subscription_keyboard(channel_link: str, channel_id: int):
     valid_url = format_link_for_button(channel_link)
     builder.button(text="✅ Подписаться на канал", url=valid_url)
     
-    # ИСПРАВЛЕНИЕ: Убедиться, что здесь используется переменная {channel_id}, а не строка 'channel_id'
+    # Используется корректный f-string с ID
     builder.button(text="Подписка оформлена", callback_data=f"sub_done:{channel_id}")
     
     builder.adjust(1)
@@ -174,7 +174,6 @@ async def process_check_required_sub(callback: types.CallbackQuery):
 
 
 # FSM: register channel
-# ... (Остальные FSM хендлеры) ...
 @dp.callback_query(F.data == "register_channel")
 async def register_channel_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -286,19 +285,23 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
 
     target_channel_info = await db.get_target_channel(user_id)
     if target_channel_info:
-        # Убедитесь, что target_channel_info возвращает 3 элемента (ID, LINK, TITLE)
-        if len(target_channel_info) < 3:
-             logger.error(f"db.get_target_channel вернул неверное количество данных: {target_channel_info}")
+        
+        # ИСПРАВЛЕНИЕ: Доступ к словарю по ключу
+        target_channel_id = target_channel_info.get("channel_id")
+        target_channel_link = target_channel_info.get("link")
+        target_channel_title = target_channel_info.get("title")
+        
+        # Дополнительная проверка на всякий случай
+        if not all([target_channel_id, target_channel_link, target_channel_title]):
+             logger.error(f"db.get_target_channel вернул неполные данные: {target_channel_info}")
              await safe_reply_or_edit(
-                "😴 Нет доступных каналов для обмена или ошибка в БД. Попробуйте позже.",
-                reply_markup=get_main_keyboard(is_registered=True)
-            )
+                 "😴 Нет доступных каналов для обмена или ошибка в БД. Попробуйте позже.",
+                 reply_markup=get_main_keyboard(is_registered=True)
+             )
              if is_callback:
-                await update_obj.answer()
+                 await update_obj.answer()
              return
             
-        target_channel_id, target_channel_link, target_channel_title = target_channel_info
-        
         msg = (
             f"✨ Обмен Подписками\n\n"
             f"1. Подпишитесь на этот канал:\n"
@@ -326,8 +329,6 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Некорректные данные (ожидается sub_done:ID).", show_alert=True)
             return
         
-        # КРИТИЧЕСКОЕ МЕСТО: Если здесь будет строка, возникнет ошибка.
-        # Мы предполагаем, что в get_subscription_keyboard теперь используется {channel_id}
         subscribed_channel_id = int(parts[1])
 
         if not await is_member(user_id, subscribed_channel_id):
@@ -339,9 +340,10 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Ошибка: Ваш канал не найден. Начните с /start.")
             return
 
-        subscriber_channel_id = user_channel_info[0]
-        subscriber_channel_link = user_channel_info[1]
-        subscriber_channel_title = user_channel_info[2]
+        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        subscriber_channel_id = user_channel_info.get("channel_id")
+        subscriber_channel_link = user_channel_info.get("link")
+        subscriber_channel_title = user_channel_info.get("title")
 
         channel_b_owner_info = await db.get_channel_owner_info(subscribed_channel_id)
         if not channel_b_owner_info:
@@ -349,8 +351,9 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Ошибка системы: не найден владелец канала B.")
             return
 
-        channel_b_owner_id = channel_b_owner_info[0]
-        channel_b_title = channel_b_owner_info[1] # При условии, что db.get_channel_owner_info возвращает (owner_id, channel_title)
+        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        channel_b_owner_id = channel_b_owner_info.get("owner_id")
+        channel_b_title = channel_b_owner_info.get("title") 
 
         # Транзакция регистрации подписки и создания долга в БД
         await db.register_subscription_and_create_debt(
@@ -380,7 +383,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
                 reply_markup=builder.as_markup()
             )
         except TelegramForbiddenError:
-             logger.warning(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}). Чат заблокирован.")
+            logger.warning(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}). Чат заблокирован.")
         except Exception:
             logger.exception(f"Не удалось уведомить владельца канала B ({channel_b_owner_id})")
 
@@ -406,7 +409,6 @@ async def process_subscription_done(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("confirm_reciprocal_sub:"))
 async def process_reciprocal_subscription(callback: types.CallbackQuery):
-# ... (Остальной код хендлера process_reciprocal_subscription) ...
     try:
         parts = callback.data.split(":")
         if len(parts) != 3:
@@ -434,8 +436,9 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
             await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
             return
 
-        channel_b_id = channel_b_info_from_owner[0]
-        channel_b_title = channel_b_info_from_owner[2]
+        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        channel_b_id = channel_b_info_from_owner.get("channel_id")
+        channel_b_title = channel_b_info_from_owner.get("title")
 
         # Получаем владельца канала A (того, кто должен был получить подписку)
         owner_a_info = await db.get_channel_owner_info(channel_that_owes_id)
@@ -443,8 +446,9 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
             await callback.answer("Ошибка: Не найден владелец канала A.")
             return
 
-        owner_a_id = owner_a_info[0]
-        channel_a_title = owner_a_info[1]
+        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        owner_a_id = owner_a_info.get("owner_id")
+        channel_a_title = owner_a_info.get("title")
 
         # Выполняем транзакцию погашения долга в БД
         new_subs_needed = await db.fulfill_debt(
@@ -480,7 +484,6 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "my_channel_stats")
 async def show_my_channel_stats(callback: types.CallbackQuery):
-# ... (Остальной код хендлера show_my_channel_stats) ...
     try:
         user_id = callback.from_user.id
         channel_info = await db.get_user_channel_info(user_id)
@@ -488,7 +491,13 @@ async def show_my_channel_stats(callback: types.CallbackQuery):
             await callback.answer("Ваш канал не зарегистрирован.", show_alert=True)
             return
 
-        channel_id, link, title, subs_needed = channel_info
+        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        # channel_id не нужен, но оставляем его для полноты
+        channel_id = channel_info.get("channel_id")
+        link = channel_info.get("link")
+        title = channel_info.get("title")
+        subs_needed = channel_info.get("subscribers_needed")
+        
         text = (
             f"📊 Статистика вашего канала\n\n"
             f"Название: <b>{title}</b>\n"
@@ -507,12 +516,13 @@ async def show_my_channel_stats(callback: types.CallbackQuery):
 
 # BACKGROUND TASK
 async def check_for_unsubs(bot_instance: Bot, db_instance):
-# ... (Остальной код фоновой задачи) ...
     try:
         while True:
             await asyncio.sleep(30 * 60)
             logger.info("Фоновая проверка отписок...")
             try:
+                # В этом запросе все хорошо, так как вы извлекаете результат с помощью _fetch, который 
+                # возвращает список словарей, и доступ к полям идет по ключам в цикле ниже.
                 rows = await db_instance._fetch(
                     """
                     SELECT
@@ -532,7 +542,13 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                 continue
 
             for row in rows:
-                sub_id, subscriber_id, subscribed_channel_id, owner_id_of_subscribed, channel_that_owes_id = row
+                # Доступ по ключу:
+                sub_id = row.get("id")
+                subscriber_id = row.get("subscriber_user_id")
+                subscribed_channel_id = row.get("subscribed_channel_id")
+                owner_id_of_subscribed = row.get("owner_id")
+                channel_that_owes_id = row.get("channel_that_owes_id")
+                
                 try:
                     if not await is_member(subscriber_id, subscribed_channel_id):
                         logger.warning(f"Обнаружена отписка: sub_id={sub_id}, user={subscriber_id}")
@@ -550,12 +566,13 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                         
                         # Уменьшение долга канала A
                         owes_info = await db_instance.get_channel_owner_info(channel_that_owes_id)
-                        owner_of_owes_id = owes_info[0] if owes_info else None
+                        # ИСПРАВЛЕНИЕ: Использование ключа
+                        owner_of_owes_id = owes_info.get("owner_id") if owes_info else None
                         
                         if owner_of_owes_id:
                             try:
                                 await db_instance._execute(
-                                    "UPDATE channels SET subscribers_needed = subscribers_needed - 1 WHERE channel_id = %s",
+                                    "UPDATE channels SET subscribers_needed = GREATEST(subscribers_needed - 1, 0) WHERE channel_id = %s", # Добавил GREATEST(..., 0) для защиты
                                     (channel_that_owes_id,)
                                 )
                                 await bot_instance.send_message(
