@@ -70,9 +70,24 @@ async def is_member(user_id: int, channel_id: int) -> bool:
         return False
 
 def format_link_for_button(link: str) -> str:
+    """
+    Гарантирует, что ссылка имеет формат URL для кнопки (http/https).
+    ЭТОТ БЛОК БЫЛ ИСПРАВЛЕН
+    """
+    # 1. Если это @username, преобразуем в полную ссылку
     if link.startswith('@'):
         return f"https://t.me/{link.lstrip('@')}"
+    
+    # 2. Если ссылка не начинается с http/https, делаем ее ссылкой на t.me
+    if not link.lower().startswith(('http://', 'https://')):
+        # Удаляем возможные t.me/ и добавляем префикс https://t.me/
+        # Это исправляет случай, когда в базе лежит просто 'username' без @ или префикса.
+        cleaned_link = link.lstrip('t.me/').lstrip('https://t.me/')
+        return f"https://t.me/{cleaned_link}"
+    
+    # 3. Иначе возвращаем ссылку как есть (это полный http/https URL)
     return link
+
 
 # KEYBOARDS
 def get_main_keyboard(is_registered: bool = False):
@@ -94,7 +109,7 @@ def get_join_main_channel_keyboard():
 
 def get_subscription_keyboard(channel_link: str, channel_id: int):
     builder = InlineKeyboardBuilder()
-    valid_url = format_link_for_button(channel_link)
+    valid_url = format_link_for_button(channel_link) # Здесь используется исправленный хелпер
     builder.button(text="✅ Подписаться на канал", url=valid_url)
     # Мы всё ещё передаём channel_id в callback, но проверяем caller_id при обработке
     builder.button(text="Подписка оформлена", callback_data=f"sub_done:{channel_id}")
@@ -184,8 +199,6 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         return
 
     # ИСПРАВЛЕНИЕ: Упрощаем регулярное выражение для надежного извлечения username.
-    # Ищем либо @username, либо t.me/username, и извлекаем только имя (без @ и t.me/)
-    # (?:@|t\.me/|t\.me/joinchat/)([A-Za-z0-9_]{5,32}|[A-Za-z0-9_-]+) - для инвайт ссылок
     match = re.search(r'(?:@|t\.me/)([A-Za-z0-9_]{5,32})', link, re.IGNORECASE)
 
     if not match:
@@ -339,232 +352,4 @@ async def process_subscription_done(callback: types.CallbackQuery):
             valid_url_a = format_link_for_button(subscriber_channel_link)
             builder.button(text=f"1️⃣ Подписаться на {subscriber_channel_title}", url=valid_url_a)
             # Важно: в callback мы передаём owner_id и channel A, но ниже проверяем совпадение caller_id == owner_id
-            callback_data = f"confirm_reciprocal_sub:{channel_b_owner_id}:{subscriber_channel_id}"
-            builder.button(text="2️⃣ Я подписался взаимно", callback_data=callback_data)
-            builder.adjust(1)
-
-            await bot.send_message(
-                chat_id=channel_b_owner_id,
-                text=(
-                    f"🎉 НОВАЯ ВЗАИМНАЯ ПОДПИСКА!\n\n"
-                    f"На ваш канал <b>{channel_b_title}</b> только что подписался пользователь "
-                    f"(@{username_a} / ID: <code>{user_id}</code>).\n\n"
-                    f"Канал подрядчика: <b>{subscriber_channel_title}</b> ({subscriber_channel_link})\n\n"
-                    "1) Подпишитесь на канал 1️⃣\n2) Нажмите 'Я подписался взаимно' 2️⃣"
-                ),
-                reply_markup=builder.as_markup()
-            )
-        except Exception:
-            logger.exception(f"Не удалось уведомить владельца канала B ({channel_b_owner_id})")
-
-        # Ответ пользователю A
-        try:
-            await callback.message.edit_text(
-                "🎉 Подписка засчитана! Ваш канал добавлен в очередь. Вы получите уведомление при завершении обмена.",
-                reply_markup=get_main_keyboard(is_registered=True)
-            )
-        except TelegramBadRequest:
-            await callback.message.answer(
-                "🎉 Подписка засчитана! Ваш канал добавлен в очередь.",
-                reply_markup=get_main_keyboard(is_registered=True)
-            )
-        await callback.answer("Подписка успешно засчитана!")
-
-    except Exception:
-        logger.exception("Ошибка в process_subscription_done")
-        await callback.answer("Произошла ошибка при обработке подписки.", show_alert=True)
-
-@dp.callback_query(F.data.startswith("confirm_reciprocal_sub:"))
-async def process_reciprocal_subscription(callback: types.CallbackQuery):
-    # Формат: confirm_reciprocal_sub:owner_b_id:channel_a_id
-    try:
-        parts = callback.data.split(":")
-        if len(parts) != 3:
-            await callback.answer("Ошибка данных колбэка.", show_alert=True)
-            return
-
-        owner_b_id = int(parts[1])
-        channel_that_owes_id = int(parts[2])
-        caller_id = callback.from_user.id
-
-        # Проверяем, что тот, кто нажал — действительно владелец B
-        if caller_id != owner_b_id:
-            await callback.answer("Вы не можете подтверждать этот обмен (не владелец канала).", show_alert=True)
-            return
-
-        # Проверяем, что владелец B подписался на канал A
-        if not await is_member(caller_id, channel_that_owes_id):
-            await callback.answer("❌ Мы не видим вашей подписки на целевой канал. Пожалуйста, подпишитесь.")
-            return
-
-        # Получаем инфо о канале B по владельцу
-        channel_b_info_from_owner = await db.get_channel_info_by_owner_id(owner_b_id)
-        if not channel_b_info_from_owner:
-            logger.error(f"Не найдена информация о канале B по ID владельца: {owner_b_id}")
-            await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
-            return
-
-        channel_b_id = channel_b_info_from_owner[0]
-        channel_b_title = channel_b_info_from_owner[2]
-
-        # Получаем владельца канала A (того, кто должен был получить подписку)
-        owner_a_info = await db.get_channel_owner_info(channel_that_owes_id)
-        if not owner_a_info:
-            await callback.answer("Ошибка: Не найден владелец канала A.")
-            return
-
-        owner_a_id = owner_a_info[0]
-        channel_a_title = owner_a_info[1]
-
-        # Выполняем транзакцию погашения долга в БД
-        try:
-            new_subs_needed = await db.fulfill_debt(
-                subscriber_user_id=caller_id,
-                subscribed_channel_id=channel_that_owes_id,
-                channel_that_owes_id=channel_that_owes_id
-            )
-        except Exception:
-            logger.exception("Ошибка транзакции fulfill_debt")
-            await callback.answer("❌ Ошибка при погашении долга. Попробуйте снова.")
-            return
-
-        # Уведомляем владельца A
-        try:
-            await bot.send_message(
-                chat_id=owner_a_id,
-                text=(
-                    f"🎉 ВЗАИМНАЯ ПОДПИСКА УСПЕШНА!\n\n"
-                    f"На ваш канал <b>{channel_a_title}</b> подписался владелец канала: <b>{channel_b_title}</b>.\n\n"
-                    f"Текущий баланс долга: <b>{new_subs_needed}</b>."
-                ),
-                reply_markup=get_main_keyboard(is_registered=True)
-            )
-        except Exception:
-            logger.exception(f"Не удалось уведомить владельца A ({owner_a_id})")
-
-        # Обновляем сообщение для владельца B
-        try:
-            await callback.message.edit_text(f"👍 Подтверждение отправлено! Вы успешно завершили взаимную подписку на канал {channel_a_title}.")
-        except TelegramBadRequest:
-            await callback.message.answer("👍 Подтверждение отправлено! Вы успешно завершили обмен.")
-
-        await callback.answer("Подписка подтверждена. Долг погашен.")
-    except Exception:
-        logger.exception("Ошибка в process_reciprocal_subscription")
-        await callback.answer("Произошла ошибка при подтверждении взаимной подписки.", show_alert=True)
-
-@dp.callback_query(F.data == "my_channel_stats")
-async def show_my_channel_stats(callback: types.CallbackQuery):
-    try:
-        user_id = callback.from_user.id
-        channel_info = await db.get_user_channel_info(user_id)
-        if not channel_info:
-            await callback.answer("Ваш канал не зарегистрирован.", show_alert=True)
-            return
-
-        channel_id, link, title, subs_needed = channel_info
-        text = (
-            f"📊 Статистика вашего канала\n\n"
-            f"Название: <b>{title}</b>\n"
-            f"Ссылка: <code>{link}</code>\n"
-            f"Баланс долга: <b>{subs_needed}</b>\n\n"
-            f"Долг {subs_needed} означает, что столько подписчиков должен получить ваш канал."
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=get_main_keyboard(is_registered=True))
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=get_main_keyboard(is_registered=True))
-        await callback.answer()
-    except Exception:
-        logger.exception("Ошибка в show_my_channel_stats")
-        await callback.answer("Произошла ошибка при показе статистики.", show_alert=True)
-
-# BACKGROUND TASK
-async def check_for_unsubs(bot_instance: Bot, db_instance):
-    try:
-        while True:
-            await asyncio.sleep(30 * 60)
-            logger.info("Фоновая проверка отписок...")
-            try:
-                rows = await db_instance._fetch(
-                    """
-                    SELECT
-                        s.id,
-                        s.subscriber_user_id,
-                        s.subscribed_channel_id,
-                        c.owner_id,
-                        s.channel_that_owes_id
-                    FROM subscriptions s
-                    JOIN channels c ON s.subscribed_channel_id = c.channel_id
-                    WHERE s.is_active = TRUE
-                    LIMIT 50
-                    """
-                )
-            except Exception:
-                logger.exception("Ошибка получения подписок из БД")
-                continue
-
-            for row in rows:
-                sub_id, subscriber_id, subscribed_channel_id, owner_id_of_subscribed, channel_that_owes_id = row
-                try:
-                    if not await is_member(subscriber_id, subscribed_channel_id):
-                        logger.warning(f"Обнаружена отписка: sub_id={sub_id}, user={subscriber_id}")
-                        try:
-                            await bot_instance.send_message(
-                                chat_id=owner_id_of_subscribed,
-                                text=f"⚠️ Внимание! Пользователь {subscriber_id} отписался от вашего канала."
-                            )
-                        except TelegramForbiddenError:
-                            logger.warning(f"Не удалось уведомить владельца канала об отписке. Чат заблокирован {owner_id_of_subscribed}.")
-                        except Exception:
-                            logger.exception("Не удалось уведомить владельца канала об отписке")
-                        owes_info = await db_instance.get_channel_owner_info(channel_that_owes_id)
-                        owner_of_owes_id = owes_info[0] if owes_info else None
-                        if owner_of_owes_id:
-                            try:
-                                await bot_instance.send_message(
-                                    chat_id=owner_of_owes_id,
-                                    text="❌ Ваш долг уменьшен на 1 в связи с аннулированием обмена."
-                                )
-                            except TelegramForbiddenError:
-                                logger.warning(f"Не удалось уведомить должника об аннулировании. Чат заблокирован {owner_of_owes_id}.")
-                            except Exception:
-                                logger.exception("Не удалось уведомить должника об аннулировании")
-                            try:
-                                await db_instance._execute(
-                                    "UPDATE channels SET subscribers_needed = subscribers_needed - 1 WHERE channel_id = %s",
-                                    (channel_that_owes_id,)
-                                )
-                            except Exception:
-                                logger.exception("Ошибка уменьшения subscribers_needed")
-                        try:
-                            await db_instance._execute("UPDATE subscriptions SET is_active = FALSE WHERE id = %s", (sub_id,))
-                        except Exception:
-                            logger.exception("Ошибка деактивации подписки")
-                except Exception:
-                    logger.exception("Ошибка при обработке строки отписок")
-    except asyncio.CancelledError:
-        logger.info("Фоновая задача check_for_unsubs отменена.")
-    except Exception:
-        logger.exception("Фоновая задача завершилась с ошибкой.")
-
-# RUN
-async def main():
-    await db.connect()
-    bg_task = None
-    if db.pool:
-        bg_task = asyncio.create_task(check_for_unsubs(bot, db))
-
-    logger.info("Бот запущен.")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        if bg_task:
-            bg_task.cancel()
-            with contextlib.suppress(Exception):
-                await bg_task
-        await db.close()
-        await bot.session.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            callback_data = f"confirm_reciprocal_sub:{channel_b_owner_
