@@ -3,7 +3,7 @@ import logging
 import re
 import os
 import traceback
-import contextlib # Добавлен, чтобы избежать ошибки в блоке __main__
+import contextlib
 from typing import Union, Optional, Tuple, Any
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError # <-- ИСПРАВЛЕНИЕ: TelegramForbidden заменено на TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 
 # REDIS / STORAGE
@@ -58,7 +58,7 @@ async def is_member(user_id: int, channel_id: int) -> bool:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         # Считаем, что все статусы, кроме LEFT/KICKED, означают членство (в т.ч. restricted)
         return member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
-    except TelegramForbiddenError: # <-- ИСПРАВЛЕНИЕ: Используем новое имя
+    except TelegramForbiddenError:
         # Бот не имеет доступа к чату, значит не может проверить -> считаем, что не член
         logger.warning("Нет доступа к информации о членстве (TelegramForbiddenError).")
         return False
@@ -198,7 +198,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         try:
             bot_member = await bot.get_chat_member(chat_id=channel_id, user_id=(await bot.get_me()).id)
             if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
-                await message.answer("❌ Бот не является администратором в вашем канале. Пожалуйста, добавьте бота и дайте нужные права.")
+                await message.answer("❌ Бот не является администратором в вашем канале. Пожалуйста, добавьте бота и дайте нужные права (особенно: 'Приглашать пользователей').")
                 await state.clear()
                 return
         except Exception:
@@ -214,8 +214,10 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await start_exchange_process(message)
 
     except TelegramBadRequest as e:
-        logger.exception("TelegramBadRequest в process_channel_link")
-        await message.answer("❌ Telegram API Ошибка: убедитесь, что канал публичный и бот добавлен как админ.")
+        # 🚨 ИСПРАВЛЕНИЕ: ДОБАВЛЕНИЕ ДЕТАЛЬНОЙ ДИАГНОСТИКИ
+        error_msg = str(e)
+        logger.exception(f"TelegramBadRequest в process_channel_link: {error_msg}")
+        await message.answer(f"❌ Telegram API Ошибка: **{error_msg}**\n\nУбедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора (особенно 'Изменять информацию' и 'Приглашать пользователей').")
     except Exception:
         logger.exception("Критическая ошибка в process_channel_link")
         await message.answer("Произошла критическая ошибка. Попробуйте снова позже.")
@@ -506,7 +508,7 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                                 chat_id=owner_id_of_subscribed,
                                 text=f"⚠️ Внимание! Пользователь {subscriber_id} отписался от вашего канала."
                             )
-                        except TelegramForbiddenError: # <-- ИСПРАВЛЕНИЕ: Используем новое имя
+                        except TelegramForbiddenError:
                             logger.warning(f"Не удалось уведомить владельца канала об отписке. Чат заблокирован {owner_id_of_subscribed}.")
                         except Exception:
                             logger.exception("Не удалось уведомить владельца канала об отписке")
@@ -518,7 +520,7 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                                     chat_id=owner_of_owes_id,
                                     text="❌ Ваш долг уменьшен на 1 в связи с аннулированием обмена."
                                 )
-                            except TelegramForbiddenError: # <-- ИСПРАВЛЕНИЕ: Используем новое имя
+                            except TelegramForbiddenError:
                                 logger.warning(f"Не удалось уведомить должника об аннулировании. Чат заблокирован {owner_of_owes_id}.")
                             except Exception:
                                 logger.exception("Не удалось уведомить должника об аннулировании")
@@ -559,6 +561,4 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    # contextlib уже импортирован выше, но для полной чистоты можно оставить здесь
-    # import contextlib 
     asyncio.run(main())
