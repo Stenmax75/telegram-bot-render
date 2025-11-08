@@ -183,13 +183,19 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await message.answer("❌ Вы находитесь в режиме регистрации канала. Отправьте, пожалуйста, только ссылку.")
         return
 
-    # Более строгая регулярка для username (5-32 chars, letters/digits/underscore)
-    match = re.search(r"@?([A-Za-z0-9_]{5,32})|t\.me/([A-Za-z0-9_]{5,32})", link, re.IGNORECASE)
+    # ИСПРАВЛЕНИЕ: Упрощаем регулярное выражение для надежного извлечения username.
+    # Ищем либо @username, либо t.me/username, и извлекаем только имя (без @ и t.me/)
+    # (?:@|t\.me/|t\.me/joinchat/)([A-Za-z0-9_]{5,32}|[A-Za-z0-9_-]+) - для инвайт ссылок
+    match = re.search(r'(?:@|t\.me/)([A-Za-z0-9_]{5,32})', link, re.IGNORECASE)
+
     if not match:
         await message.answer("❌ Некорректный формат ссылки. Используйте @username или https://t.me/username.")
         return
 
-    channel_username = '@' + (match.group(1) or match.group(2))
+    # Форматируем полученное имя в формат, который гарантированно работает с bot.get_chat()
+    raw_username = match.group(1)
+    channel_username = '@' + raw_username 
+    
     try:
         chat = await bot.get_chat(chat_id=channel_username)
         channel_id = chat.id
@@ -214,7 +220,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await start_exchange_process(message)
 
     except TelegramBadRequest as e:
-        # 🚨 ИСПРАВЛЕНИЕ: ДОБАВЛЕНИЕ ДЕТАЛЬНОЙ ДИАГНОСТИКИ
+        # 🚨 ДИАГНОСТИКА: Выводим точный текст ошибки от Telegram
         error_msg = str(e)
         logger.exception(f"TelegramBadRequest в process_channel_link: {error_msg}")
         await message.answer(f"❌ Telegram API Ошибка: **{error_msg}**\n\nУбедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора (особенно 'Изменять информацию' и 'Приглашать пользователей').")
