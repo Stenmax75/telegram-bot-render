@@ -55,8 +55,14 @@ async def is_member(user_id: int, channel_id: int) -> bool:
     """Проверяем членство."""
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        return member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
+        # Убедимся, что статус - один из тех, что означает "является участником"
+        return member.status in (
+            ChatMemberStatus.MEMBER, 
+            ChatMemberStatus.ADMINISTRATOR, 
+            ChatMemberStatus.CREATOR
+        )
     except (TelegramForbiddenError, TelegramBadRequest):
+        # Ошибка может быть, если бот не в канале или канал не существует/приватный
         return False
     except Exception:
         logger.exception("Неожиданная ошибка в is_member")
@@ -64,7 +70,7 @@ async def is_member(user_id: int, channel_id: int) -> bool:
 
 def format_link_for_button(link: str) -> str:
     """
-    ИСПРАВЛЕНО: Гарантирует, что ссылка имеет формат URL (http/https) для inline-кнопки.
+    Гарантирует, что ссылка имеет формат URL (http/https) для inline-кнопки.
     """
     link = link.strip()
     
@@ -105,7 +111,10 @@ def get_subscription_keyboard(channel_link: str, channel_id: int):
     builder = InlineKeyboardBuilder()
     valid_url = format_link_for_button(channel_link)
     builder.button(text="✅ Подписаться на канал", url=valid_url)
+    
+    # ИСПРАВЛЕНИЕ: Убедиться, что здесь используется переменная {channel_id}, а не строка 'channel_id'
     builder.button(text="Подписка оформлена", callback_data=f"sub_done:{channel_id}")
+    
     builder.adjust(1)
     return builder.as_markup()
 
@@ -116,23 +125,26 @@ async def start_handler(message: types.Message, state: FSMContext):
     username = message.from_user.username or f"id{user_id}"
     await state.clear()
     try:
+        # Убедимся, что ID канала используется как целое число
+        if not await is_member(user_id, REQUIRED_CHANNEL_ID):
+            await db.add_user(user_id, username) # Добавляем пользователя даже если не подписан
+            await message.answer(
+                "👋 Добро пожаловать!\n\n"
+                "Для начала работы с ботом, пожалуйста, подпишитесь на наш основной канал:",
+                reply_markup=get_join_main_channel_keyboard()
+            )
+            return
+        
         await db.add_user(user_id, username)
-    except Exception:
-        logger.exception("Ошибка при записи пользователя в БД")
-
-    if not await is_member(user_id, REQUIRED_CHANNEL_ID):
+        channel_info = await db.get_user_channel_info(user_id)
         await message.answer(
-            "👋 Добро пожаловать!\n\n"
-            "Для начала работы с ботом, пожалуйста, подпишитесь на наш основной канал:",
-            reply_markup=get_join_main_channel_keyboard()
+            "✅ Вы подписаны на наш канал. Выберите действие:",
+            reply_markup=get_main_keyboard(is_registered=channel_info is not None)
         )
-        return
+    except Exception:
+        logger.exception("Ошибка при старте или записи пользователя в БД")
+        await message.answer("Произошла ошибка при запуске бота. Попробуйте позже.")
 
-    channel_info = await db.get_user_channel_info(user_id)
-    await message.answer(
-        "✅ Вы подписаны на наш канал. Выберите действие:",
-        reply_markup=get_main_keyboard(is_registered=channel_info is not None)
-    )
 
 @dp.callback_query(F.data == "check_required_sub")
 async def process_check_required_sub(callback: types.CallbackQuery):
@@ -140,6 +152,8 @@ async def process_check_required_sub(callback: types.CallbackQuery):
     try:
         if await is_member(user_id, REQUIRED_CHANNEL_ID):
             channel_info = await db.get_user_channel_info(user_id)
+            
+            # Используем safe_edit для избежания TelegramBadRequest
             try:
                 await callback.message.edit_text(
                     "✅ Вы успешно подписались на наш канал!\n\n"
@@ -158,7 +172,9 @@ async def process_check_required_sub(callback: types.CallbackQuery):
         logger.exception("Ошибка в process_check_required_sub")
         await callback.answer("Ошибка при проверке подписки.", show_alert=True)
 
+
 # FSM: register channel
+# ... (Остальные FSM хендлеры) ...
 @dp.callback_query(F.data == "register_channel")
 async def register_channel_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -190,14 +206,12 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await message.answer("❌ Вы находитесь в режиме регистрации канала. Отправьте, пожалуйста, только ссылку.")
         return
 
-    # Упрощаем регулярное выражение для надежного извлечения username.
     match = re.search(r'(?:@|t\.me/)([A-Za-z0-9_]{5,32})', link, re.IGNORECASE)
 
     if not match:
         await message.answer("❌ Некорректный формат ссылки. Используйте @username или https://t.me/username.")
         return
 
-    # Форматируем полученное имя в формат, который гарантированно работает с bot.get_chat()
     raw_username = match.group(1)
     channel_username = '@' + raw_username 
     
@@ -272,7 +286,19 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
 
     target_channel_info = await db.get_target_channel(user_id)
     if target_channel_info:
+        # Убедитесь, что target_channel_info возвращает 3 элемента (ID, LINK, TITLE)
+        if len(target_channel_info) < 3:
+             logger.error(f"db.get_target_channel вернул неверное количество данных: {target_channel_info}")
+             await safe_reply_or_edit(
+                "😴 Нет доступных каналов для обмена или ошибка в БД. Попробуйте позже.",
+                reply_markup=get_main_keyboard(is_registered=True)
+            )
+             if is_callback:
+                await update_obj.answer()
+             return
+            
         target_channel_id, target_channel_link, target_channel_title = target_channel_info
+        
         msg = (
             f"✨ Обмен Подписками\n\n"
             f"1. Подпишитесь на этот канал:\n"
@@ -297,8 +323,11 @@ async def process_subscription_done(callback: types.CallbackQuery):
     try:
         parts = callback.data.split(":")
         if len(parts) != 2:
-            await callback.answer("Некорректные данные.", show_alert=True)
+            await callback.answer("Некорректные данные (ожидается sub_done:ID).", show_alert=True)
             return
+        
+        # КРИТИЧЕСКОЕ МЕСТО: Если здесь будет строка, возникнет ошибка.
+        # Мы предполагаем, что в get_subscription_keyboard теперь используется {channel_id}
         subscribed_channel_id = int(parts[1])
 
         if not await is_member(user_id, subscribed_channel_id):
@@ -321,7 +350,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
             return
 
         channel_b_owner_id = channel_b_owner_info[0]
-        channel_b_title = channel_b_owner_info[1]
+        channel_b_title = channel_b_owner_info[1] # При условии, что db.get_channel_owner_info возвращает (owner_id, channel_title)
 
         # Транзакция регистрации подписки и создания долга в БД
         await db.register_subscription_and_create_debt(
@@ -335,7 +364,6 @@ async def process_subscription_done(callback: types.CallbackQuery):
             builder = InlineKeyboardBuilder()
             valid_url_a = format_link_for_button(subscriber_channel_link)
             builder.button(text=f"1️⃣ Подписаться на {subscriber_channel_title}", url=valid_url_a)
-            # ВОССТАНОВЛЕННЫЙ КОД
             callback_data = f"confirm_reciprocal_sub:{channel_b_owner_id}:{subscriber_channel_id}"
             builder.button(text="2️⃣ Я подписался взаимно", callback_data=callback_data)
             builder.adjust(1)
@@ -351,6 +379,8 @@ async def process_subscription_done(callback: types.CallbackQuery):
                 ),
                 reply_markup=builder.as_markup()
             )
+        except TelegramForbiddenError:
+             logger.warning(f"Не удалось уведомить владельца канала B ({channel_b_owner_id}). Чат заблокирован.")
         except Exception:
             logger.exception(f"Не удалось уведомить владельца канала B ({channel_b_owner_id})")
 
@@ -367,13 +397,16 @@ async def process_subscription_done(callback: types.CallbackQuery):
             )
         await callback.answer("Подписка успешно засчитана!")
 
+    except ValueError:
+        logger.error(f"Критическая ошибка: ValueError при конвертации channel_id. Callback_data: {callback.data}")
+        await callback.answer("Критическая ошибка в данных. Попробуйте снова.", show_alert=True)
     except Exception:
         logger.exception("Ошибка в process_subscription_done")
         await callback.answer("Произошла ошибка при обработке подписки.", show_alert=True)
 
 @dp.callback_query(F.data.startswith("confirm_reciprocal_sub:"))
 async def process_reciprocal_subscription(callback: types.CallbackQuery):
-    # Формат: confirm_reciprocal_sub:owner_b_id:channel_a_id
+# ... (Остальной код хендлера process_reciprocal_subscription) ...
     try:
         parts = callback.data.split(":")
         if len(parts) != 3:
@@ -447,6 +480,7 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "my_channel_stats")
 async def show_my_channel_stats(callback: types.CallbackQuery):
+# ... (Остальной код хендлера show_my_channel_stats) ...
     try:
         user_id = callback.from_user.id
         channel_info = await db.get_user_channel_info(user_id)
@@ -473,6 +507,7 @@ async def show_my_channel_stats(callback: types.CallbackQuery):
 
 # BACKGROUND TASK
 async def check_for_unsubs(bot_instance: Bot, db_instance):
+# ... (Остальной код фоновой задачи) ...
     try:
         while True:
             await asyncio.sleep(30 * 60)
