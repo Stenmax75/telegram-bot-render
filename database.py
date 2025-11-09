@@ -195,7 +195,6 @@ class Database:
         """То же, что get_user_channel_info (запрос с другим именем для читабельности)."""
         return await self.get_user_channel_info(owner_id)
 
-    # *** НЕДОСТАЮЩИЙ МЕТОД (причина ошибки) ***
     async def is_channel_registered_by_other(self, channel_id: int, user_id: int) -> bool:
         """
         Проверяет, зарегистрирован ли канал с данным channel_id и принадлежит ли он 
@@ -209,7 +208,6 @@ class Database:
         # Если найдена хотя бы одна строка, значит, канал зарегистрирован другим
         result = await self._fetchrow(query, channel_id, user_id)
         return result is not None
-    # *****************************************
 
     async def add_channel(self, owner_id: int, channel_id: int, link: str, title: str) -> bool:
         """
@@ -272,7 +270,7 @@ class Database:
 
     async def get_channel_to_verify(self) -> Optional[Dict[str, Any]]:
         """
-        *** НЕДОСТАЮЩИЙ МЕТОД: *** Получить канал, который нужно проверить на предмет отписки. 
+        Получить канал, который нужно проверить на предмет отписки. 
         Например, самый старый канал в очереди или канал с наибольшим долгом.
         """
         query = """
@@ -300,14 +298,13 @@ class Database:
           - вставляет запись в subscriptions.
         Возвращает новое значение subscribers_needed.
         """
-        # ... (логика внутри транзакции остаётся без изменений) ...
         if not self.pool:
             raise DatabaseError("DB pool is not initialized")
 
         async with self.transaction() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 try:
-                    # 1. Блокируем строку канала-должника
+                    # 1. Блокируем строку канала-должника (Канал A)
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s FOR UPDATE",
                         (subscriber_channel_id,)
@@ -317,12 +314,14 @@ class Database:
                         raise NotFoundError(f"Channel to receive subscribers not found: {subscriber_channel_id}")
 
                     # 2. Проверяем, есть ли уже активная подписка (Пользователь A -> Канал B)
+                    # ИСПРАВЛЕНИЕ: Убрано channel_that_owes_id из WHERE для поиска существующей подписки, 
+                    # чтобы предотвратить некорректное поведение при переподписке/ошибке.
                     await cur.execute(
                         """SELECT id FROM subscriptions
                            WHERE subscriber_user_id = %s AND subscribed_channel_id = %s
-                                 AND channel_that_owes_id = %s AND is_active = TRUE
+                             AND is_active = TRUE
                            FOR UPDATE""",
-                        (subscriber_user_id, subscribed_channel_id, subscriber_channel_id)
+                        (subscriber_user_id, subscribed_channel_id)
                     )
                     existing = await cur.fetchone()
                     if existing:
@@ -338,7 +337,7 @@ class Database:
                         (subscriber_channel_id,)
                     )
 
-                    # 4. Вставляем запись подписки
+                    # 4. Вставляем запись подписки (channel_that_owes_id = Канал A)
                     await cur.execute(
                         """INSERT INTO subscriptions
                            (subscriber_user_id, subscribed_channel_id, channel_that_owes_id, is_active)
@@ -414,22 +413,23 @@ class Database:
                     logger.exception("Ошибка в fulfill_debt")
                     raise
 
-    # *** НЕДОСТАЮЩИЙ МЕТОД: *** async def get_active_subscriptions_to_check(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_active_subscriptions_to_check(self, limit: int = 50) -> List[Dict[str, Any]]:
         """
-        Получает список активных подписок для периодической проверки. 
-        Предполагаем, что нужно проверить те подписки, которые долго были активны.
+        Получает список активных подписок для периодической проверки на отписку. 
+        Включает owner_id для удобства уведомления владельца канала.
         """
         query = """
             SELECT 
-                s.id, s.subscriber_user_id, s.subscribed_channel_id, s.channel_that_owes_id
+                s.id, s.subscriber_user_id, s.subscribed_channel_id, s.channel_that_owes_id, c.owner_id
             FROM subscriptions s
+            JOIN channels c ON s.subscribed_channel_id = c.channel_id
             WHERE s.is_active = TRUE 
             ORDER BY s.created_at ASC
             LIMIT %s
         """
         return await self._fetch(query, limit)
 
-    # *** НЕДОСТАЮЩИЙ МЕТОД: *** async def get_channel_debt(self, channel_id: int) -> int:
+    async def get_channel_debt(self, channel_id: int) -> int:
         """Получает текущий долг канала (сколько нужно получить подписчиков)."""
         row = await self._fetchrow(
             "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
