@@ -489,8 +489,8 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
 
         # Выполняем транзакцию погашения долга в БД
         new_subs_needed = await db.fulfill_debt(
-            subscriber_user_id=caller_id,
-            subscribed_channel_id=subscribed_channel_id,
+            #subscriber_user_id=caller_id,
+            #subscribed_channel_id=subscribed_channel_id,
             channel_that_owes_id=channel_that_owes_id 
         )
 
@@ -658,3 +658,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
