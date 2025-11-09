@@ -20,6 +20,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # Конфиг и БД (убедитесь, что REQUIRED_CHANNEL_ID в config_1 - int)
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
 from database import db
+from database import NotFoundError # Импортируем NotFoundError для обработки ошибок БД
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -297,7 +298,7 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
              await safe_reply_or_edit(
                  "😴 Нет доступных каналов для обмена или ошибка в БД. Попробуйте позже.",
                  reply_markup=get_main_keyboard(is_registered=True)
-             )
+               )
              if is_callback:
                  await update_obj.answer()
              return
@@ -329,6 +330,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Некорректные данные (ожидается sub_done:ID).", show_alert=True)
             return
         
+        # subscribed_channel_id (Канал B) - канал, на который подписался Пользователь A
         subscribed_channel_id = int(parts[1])
 
         if not await is_member(user_id, subscribed_channel_id):
@@ -340,7 +342,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Ошибка: Ваш канал не найден. Начните с /start.")
             return
 
-        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
+        # subscriber_channel_id (Канал A) - канал, который должен получить подписчика (создает долг)
         subscriber_channel_id = user_channel_info.get("channel_id")
         subscriber_channel_link = user_channel_info.get("link")
         subscriber_channel_title = user_channel_info.get("title")
@@ -351,7 +353,6 @@ async def process_subscription_done(callback: types.CallbackQuery):
             await callback.answer("Ошибка системы: не найден владелец канала B.")
             return
 
-        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
         channel_b_owner_id = channel_b_owner_info.get("owner_id")
         channel_b_title = channel_b_owner_info.get("title") 
 
@@ -367,7 +368,13 @@ async def process_subscription_done(callback: types.CallbackQuery):
             builder = InlineKeyboardBuilder()
             valid_url_a = format_link_for_button(subscriber_channel_link)
             builder.button(text=f"1️⃣ Подписаться на {subscriber_channel_title}", url=valid_url_a)
-            callback_data = f"confirm_reciprocal_sub:{channel_b_owner_id}:{subscriber_channel_id}"
+            
+            # 💡 ПРАВКА 1: Формируем callback_data: 
+            # 1. owner_b_id (Владелец B, кто нажимает)
+            # 2. channel_a_id (Канал A, который получает подписчика и которому должен владелец B)
+            # 3. channel_b_id (Канал B, на который подписался Пользователь A, создавая долг - НУЖЕН для fulfill_debt)
+            callback_data = f"confirm_reciprocal_sub:{channel_b_owner_id}:{subscriber_channel_id}:{subscribed_channel_id}" 
+            
             builder.button(text="2️⃣ Я подписался взаимно", callback_data=callback_data)
             builder.adjust(1)
 
@@ -411,12 +418,15 @@ async def process_subscription_done(callback: types.CallbackQuery):
 async def process_reciprocal_subscription(callback: types.CallbackQuery):
     try:
         parts = callback.data.split(":")
-        if len(parts) != 3:
+        
+        # 💡 ПРАВКА 2: Ожидаем 4 части: 'confirm_reciprocal_sub', owner_b_id, channel_a_id, channel_b_id
+        if len(parts) != 4:
             await callback.answer("Ошибка данных колбэка.", show_alert=True)
             return
 
         owner_b_id = int(parts[1])
-        channel_that_owes_id = int(parts[2])
+        channel_that_owes_id = int(parts[2]) # Канал A (кому должны)
+        subscribed_channel_id = int(parts[3]) # Канал B (на который изначально подписался Пользователь A, создавая долг)
         caller_id = callback.from_user.id
 
         # Проверяем, что тот, кто нажал — действительно владелец B
@@ -429,14 +439,13 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
             await callback.answer("❌ Мы не видим вашей подписки на целевой канал. Пожалуйста, подпишитесь.")
             return
 
-        # Получаем инфо о канале B по владельцу
+        # Получаем инфо о канале B по владельцу (не обязательно, но полезно для логов/сообщений)
         channel_b_info_from_owner = await db.get_channel_info_by_owner_id(owner_b_id)
         if not channel_b_info_from_owner:
             logger.error(f"Не найдена информация о канале B по ID владельца: {owner_b_id}")
             await callback.answer("Ошибка: не удалось найти информацию о вашем канале (B).")
             return
 
-        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
         channel_b_id = channel_b_info_from_owner.get("channel_id")
         channel_b_title = channel_b_info_from_owner.get("title")
 
@@ -446,15 +455,15 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
             await callback.answer("Ошибка: Не найден владелец канала A.")
             return
 
-        # ИСПРАВЛЕНИЕ: Использование ключей вместо индексов
         owner_a_id = owner_a_info.get("owner_id")
         channel_a_title = owner_a_info.get("title")
 
         # Выполняем транзакцию погашения долга в БД
+        # Передаем: Владелец B, Канал B (куда подписался A), Канал A (который должен получить подписчика)
         new_subs_needed = await db.fulfill_debt(
             subscriber_user_id=caller_id,
-            subscribed_channel_id=channel_that_owes_id,
-            channel_that_owes_id=channel_that_owes_id
+            subscribed_channel_id=subscribed_channel_id, # Канал B (куда подписался A)
+            channel_that_owes_id=channel_that_owes_id   # Канал A (который должен)
         )
 
         # Уведомляем владельца A
@@ -478,6 +487,9 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
             await callback.message.answer("👍 Подтверждение отправлено! Вы успешно завершили обмен.")
 
         await callback.answer("Подписка подтверждена. Долг погашен.")
+    except NotFoundError as e:
+        logger.error(f"NotFoundError в process_reciprocal_subscription: {e}. Данные: {callback.data}")
+        await callback.answer("❌ Активный долг для погашения не найден. Обмен уже завершен или ошибка в БД.", show_alert=True)
     except Exception:
         logger.exception("Ошибка в process_reciprocal_subscription")
         await callback.answer("Произошла ошибка при подтверждении взаимной подписки.", show_alert=True)
