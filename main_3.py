@@ -1,3 +1,4 @@
+#main_3.py 
 import asyncio
 import logging
 import re
@@ -61,7 +62,7 @@ async def is_member(user_id: int, channel_id: Union[int, str]) -> bool:
         return member.status in (
             ChatMemberStatus.MEMBER, 
             ChatMemberStatus.ADMINISTRATOR, 
-            ChatMemberStatus.CREATOR # ИСПРАВЛЕНИЕ: Использование CREATOR
+            ChatMemberStatus.CREATOR
         )
     except (TelegramForbiddenError, TelegramBadRequest):
         return False
@@ -96,13 +97,14 @@ async def safe_edit_or_reply(update_obj: Union[types.CallbackQuery, types.Messag
     
     try:
         if is_callback and message_obj:
-            await message_obj.edit_text(text, reply_markup=reply_markup)
+            await message_obj.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            await message_obj.answer(text, reply_markup=reply_markup)
-    except TelegramBadRequest:
+            await message_obj.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramBadRequest as e:
         # Если редактирование не удалось (сообщение не изменилось, или слишком старое)
         if message_obj:
-            await message_obj.answer(text, reply_markup=reply_markup)
+            logger.warning(f"Ошибка редактирования: {e}. Отправка нового сообщения.")
+            await message_obj.answer(text, reply_markup=reply_markup, parse_mode="HTML")
     except Exception:
         logger.exception("Ошибка при отправке/редактировании сообщения")
 
@@ -182,7 +184,9 @@ async def process_check_required_sub(callback: types.CallbackQuery):
         logger.exception("Ошибка в process_check_required_sub")
         await callback.answer("Ошибка при проверке подписки.", show_alert=True)
     finally:
-        await callback.answer()
+        # Важно: answer должен быть вызван в конце, но safe_edit_or_reply уже вызывает его для колбэка
+        # await callback.answer()
+        pass
 
 
 # FSM: register channel
@@ -229,7 +233,6 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         # Проверка прав администратора
         try:
             bot_member = await bot.get_chat_member(chat_id=channel_id, user_id=(await bot.get_me()).id)
-            # ИСПРАВЛЕНИЕ: Замена OWNER на CREATOR
             if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
                 await message.answer("❌ Бот не является администратором в вашем канале. Пожалуйста, добавьте бота и дайте нужные права (особенно: 'Приглашать пользователей').")
                 await state.clear()
@@ -255,7 +258,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     except TelegramBadRequest as e:
         error_msg = str(e)
         logger.error(f"TelegramBadRequest в process_channel_link: {error_msg}")
-        await message.answer(f"❌ Telegram API Ошибка: **{error_msg}**\n\nУбедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора.")
+        await message.answer(f"❌ Telegram API Ошибка: <b>{error_msg}</b>\n\nУбедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора.")
     except Exception:
         logger.exception("Критическая ошибка в process_channel_link")
         await message.answer("Произошла критическая ошибка. Попробуйте снова позже.")
@@ -297,7 +300,7 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
         target_channel_link = target_channel_info.get("link")
         target_channel_title = target_channel_info.get("title")
         
-        # Проверяем, не является ли пользователь уже подписчиком
+        # Проверяем, не является ли пользователь уже подписчиком (защита от гонки и ошибок БД)
         if await is_member(user_id, target_channel_id):
             await safe_edit_or_reply(
                 update_obj,
@@ -315,7 +318,13 @@ async def start_exchange_process(update_obj: Union[types.CallbackQuery, types.Me
             f"Ссылка: <code>{target_channel_link}</code>\n\n"
             f"После подписки нажмите кнопку 'Подписка оформлена'."
         )
-        await safe_edit_or_reply(msg, reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id))
+        
+        # ИСПРАВЛЕНИЕ: Передача update_obj первым аргументом
+        await safe_edit_or_reply(
+            update_obj, 
+            msg, 
+            reply_markup=get_subscription_keyboard(target_channel_link, target_channel_id)
+        )
     else:
         # Улучшенное сообщение об ошибке/отсутствии каналов
         if target_channel_info:
@@ -369,7 +378,7 @@ async def process_subscription_done(callback: types.CallbackQuery):
         channel_b_title = channel_b_owner_info.get("title") 
 
         # Транзакция регистрации подписки и создания долга в БД
-        await db.register_subscription_and_create_debt(
+        new_subs_needed = await db.register_subscription_and_create_debt(
             subscriber_user_id=user_id,
             subscribed_channel_id=subscribed_channel_id,
             subscriber_channel_id=subscriber_channel_id
@@ -431,7 +440,7 @@ async def process_reciprocal_subscription(callback: types.CallbackQuery):
 
         owner_b_id = int(parts[1])
         channel_that_owes_id = int(parts[2])    # Канал A (кому должны)
-        subscribed_channel_id = int(parts[3])   # Канал B (на который изначально подписался Пользователь A)
+        subscribed_channel_id = int(parts[3])    # Канал B (на который изначально подписался Пользователь A)
         caller_id = callback.from_user.id
 
         # Проверяем, что тот, кто нажал — действительно владелец B
@@ -564,7 +573,9 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                         logger.warning(f"Обнаружена отписка: sub_id={sub_id}, user={subscriber_id}")
                         
                         # Деактивация подписки
-                        await db_instance._execute("UPDATE subscriptions SET is_active = FALSE WHERE id = %s", (sub_id,))
+                        # Обратите внимание: здесь используется _execute без транзакции, что может быть не атомарно.
+                        # В боевой системе лучше использовать транзакцию для деактивации и обновления счетчика.
+                        await db_instance._execute("UPDATE subscriptions SET is_active = FALSE WHERE id = %s", sub_id)
                         
                         # Уменьшение долга канала A (если он есть)
                         owes_info = await db_instance.get_channel_owner_info(channel_that_owes_id)
@@ -574,7 +585,7 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                             try:
                                 await db_instance._execute(
                                     "UPDATE channels SET subscribers_needed = GREATEST(subscribers_needed - 1, 0) WHERE channel_id = %s", 
-                                    (channel_that_owes_id,)
+                                    channel_that_owes_id
                                 )
                                 await bot_instance.send_message(
                                     chat_id=owner_of_owes_id,
@@ -585,17 +596,17 @@ async def check_for_unsubs(bot_instance: Bot, db_instance):
                             except Exception:
                                 logger.exception("Ошибка уменьшения subscribers_needed или уведомления должника")
                                 
-                        # Уведомление владельца канала B
-                        try:
-                            await bot_instance.send_message(
-                                chat_id=owner_id_of_subscribed,
-                                text=f"⚠️ Внимание! Пользователь {subscriber_id} отписался от вашего канала. Обмен аннулирован."
-                            )
-                        except TelegramForbiddenError:
-                            logger.warning(f"Не удалось уведомить владельца канала об отписке. Чат заблокирован {owner_id_of_subscribed}.")
-                        except Exception:
-                            logger.exception("Не удалось уведомить владельца канала об отписке")
-                            
+                            # Уведомление владельца канала B
+                            try:
+                                await bot_instance.send_message(
+                                    chat_id=owner_id_of_subscribed,
+                                    text=f"⚠️ Внимание! Пользователь {subscriber_id} отписался от вашего канала. Обмен аннулирован."
+                                )
+                            except TelegramForbiddenError:
+                                logger.warning(f"Не удалось уведомить владельца канала об отписке. Чат заблокирован {owner_id_of_subscribed}.")
+                            except Exception:
+                                logger.exception("Не удалось уведомить владельца канала об отписке")
+                                
                 except Exception:
                     logger.exception(f"Ошибка при обработке строки отписок (sub_id: {sub_id})")
     except asyncio.CancelledError:
