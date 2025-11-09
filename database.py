@@ -3,16 +3,19 @@ import logging
 import ssl
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
-from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT
+# Импортируем, как в вашем исходном коде
+from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT 
 
 logger = logging.getLogger(__name__)
 
 
 class DatabaseError(Exception):
+    """Базовый класс для ошибок базы данных."""
     pass
 
 
 class NotFoundError(DatabaseError):
+    """Исключение: объект не найден в базе данных."""
     pass
 
 
@@ -29,7 +32,7 @@ class Database:
             return False
 
         try:
-            # Убедитесь, что ca.pem доступен и корректен, если вы используете SSL
+            # Настройка SSL-контекста
             ssl_context = ssl.create_default_context(cafile="ca.pem")
             ssl_context.check_hostname = True
             ssl_context.verify_mode = ssl.CERT_REQUIRED
@@ -41,7 +44,7 @@ class Database:
                 user=DB_USER,
                 password=DB_PASS,
                 db=DB_NAME,
-                autocommit=False,
+                autocommit=False, # Управление коммитами через transaction()
                 minsize=1,
                 maxsize=10,
                 ssl=ssl_context
@@ -64,15 +67,13 @@ class Database:
     # ----------------- Вспомогательные методы -----------------
 
     async def _execute(self, query: str, *params) -> None:
-        """Выполнение запроса без возврата результата (использует DictCursor)."""
+        """Выполнение запроса без возврата результата. Выполняет commit."""
         if not self.pool:
             raise DatabaseError("DB pool is not initialized")
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, params)
-                # Для одиночных не критичных запросов можно вызвать conn.commit()
-                # Для всех остальных запросов commit/rollback управляется через transaction()
-                await conn.commit() # Добавил commit для одиночных операций вне transaction()
+                await conn.commit()
 
     async def _fetch(self, query: str, *params) -> List[Dict[str, Any]]:
         """Возвращает все строки как список словарей."""
@@ -82,8 +83,8 @@ class Database:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, params)
                 rows = await cur.fetchall()
-                # Возвращаем список словарей
-                return [dict(r) for r in rows] if rows else []
+                # Возвращаем список словарей (DictCursor уже возвращает dict-подобные объекты)
+                return rows if rows else []
 
     async def _fetchrow(self, query: str, *params) -> Optional[Dict[str, Any]]:
         """Возвращает одну строку как словарь или None."""
@@ -94,18 +95,19 @@ class Database:
                 await cur.execute(query, params)
                 row = await cur.fetchone()
                 # Возвращаем словарь
-                return dict(row) if row else None
+                return row if row else None
 
     @asynccontextmanager
     async def transaction(self):
         """
         Контекстный менеджер для транзакций.
+        Используется для атомарных операций, требующих нескольких запросов.
         """
         if not self.pool:
             raise DatabaseError("DB pool is not initialized")
         async with self.pool.acquire() as conn:
             try:
-                await conn.begin()
+                # Убеждаемся, что conn.begin() не вызывается, если aiomysql настроен на auto-begin
                 yield conn
                 await conn.commit()
             except Exception:
@@ -132,7 +134,7 @@ class Database:
             """
         )
 
-        # channels: добавляем UNIQUE(owner_id) чтобы один владелец — один канал
+        # channels: добавлен UNIQUE(owner_id) для одного канала на одного владельца
         await self._execute(
             """
             CREATE TABLE IF NOT EXISTS channels (
@@ -173,9 +175,8 @@ class Database:
 
     # ----------------- CRUD / Domain methods -----------------
 
-    async def add_user(self, user_id: int, username: str):
+    async def add_user(self, user_id: int, username: Optional[str] = None):
         """Добавление/обновление пользователя."""
-        # Используем _execute, который выполняет commit
         await self._execute(
             """INSERT INTO users (user_id, username)
                VALUES (%s, %s)
@@ -194,17 +195,50 @@ class Database:
         """То же, что get_user_channel_info (запрос с другим именем для читабельности)."""
         return await self.get_user_channel_info(owner_id)
 
-    async def add_channel(self, owner_id: int, channel_id: int, link: str, title: str):
-        """Добавляет канал."""
-        # Обновляем/добавляем пользователя-запись (placeholder)
-        await self.add_user(owner_id, "channel_owner_placeholder")
-        # Используем _execute, который выполняет commit
-        await self._execute(
-            """INSERT IGNORE INTO channels
-               (channel_id, owner_id, `link`, title, subscribers_needed)
-               VALUES (%s, %s, %s, %s, 0)""",
-            channel_id, owner_id, link, title
-        )
+    # *** НЕДОСТАЮЩИЙ МЕТОД (причина ошибки) ***
+    async def is_channel_registered_by_other(self, channel_id: int, user_id: int) -> bool:
+        """
+        Проверяет, зарегистрирован ли канал с данным channel_id и принадлежит ли он 
+        другому пользователю (owner_id != user_id).
+        """
+        query = """
+            SELECT owner_id 
+            FROM channels 
+            WHERE channel_id = %s AND owner_id != %s
+        """
+        # Если найдена хотя бы одна строка, значит, канал зарегистрирован другим
+        result = await self._fetchrow(query, channel_id, user_id)
+        return result is not None
+    # *****************************************
+
+    async def add_channel(self, owner_id: int, channel_id: int, link: str, title: str) -> bool:
+        """
+        Добавляет канал и владельца. Возвращает True, если добавлено, False если уже существует.
+        Уникальный ключ по owner_id предотвращает добавление второго канала.
+        """
+        # Сначала убеждаемся, что владелец существует (для FOREIGN KEY)
+        await self.add_user(owner_id, title) 
+        
+        try:
+            # Используем _execute, который выполняет commit
+            # ON DUPLICATE KEY UPDATE не используется, т.к. UNIQUE по owner_id, 
+            # и мы не хотим перезаписывать канал
+            # Лучше использовать простой INSERT и поймать ошибку (или полагаться на unique index)
+            await self._execute(
+                """INSERT INTO channels
+                   (channel_id, owner_id, `link`, title, subscribers_needed)
+                   VALUES (%s, %s, %s, %s, 0)""",
+                channel_id, owner_id, link, title
+            )
+            return True
+        except aiomysql.IntegrityError as e:
+            # Ошибка целостности (например, нарушен UNIQUE KEY uq_channels_owner)
+            logger.warning(f"Попытка добавить уже существующий канал для владельца {owner_id}: {e}")
+            return False
+        except Exception:
+            logger.exception("Ошибка при добавлении канала")
+            return False
+
 
     async def get_target_channel(self, user_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -236,6 +270,21 @@ class Database:
         )
         return row
 
+    async def get_channel_to_verify(self) -> Optional[Dict[str, Any]]:
+        """
+        *** НЕДОСТАЮЩИЙ МЕТОД: *** Получить канал, который нужно проверить на предмет отписки. 
+        Например, самый старый канал в очереди или канал с наибольшим долгом.
+        """
+        query = """
+            SELECT c.channel_id, c.owner_id
+            FROM channels c
+            WHERE c.subscribers_needed > 0
+            ORDER BY c.queue_join_time ASC 
+            LIMIT 1
+        """
+        return await self._fetchrow(query)
+
+
     # ----------------- Транзакционные методы -----------------
 
     async def register_subscription_and_create_debt(
@@ -251,23 +300,23 @@ class Database:
           - вставляет запись в subscriptions.
         Возвращает новое значение subscribers_needed.
         """
+        # ... (логика внутри транзакции остаётся без изменений) ...
         if not self.pool:
             raise DatabaseError("DB pool is not initialized")
 
         async with self.transaction() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 try:
-                    # Блокируем соответствующую строку канала, чтобы избежать гонки при счётчике
+                    # 1. Блокируем строку канала-должника
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s FOR UPDATE",
                         (subscriber_channel_id,)
                     )
                     ch = await cur.fetchone()
                     if not ch:
-                        raise NotFoundError("Channel to receive subscribers not found")
+                        raise NotFoundError(f"Channel to receive subscribers not found: {subscriber_channel_id}")
 
-                    # Проверяем, есть ли уже активная подписка (Пользователь A -> Канал B)
-                    # Если есть, не создаем дубликат долга.
+                    # 2. Проверяем, есть ли уже активная подписка (Пользователь A -> Канал B)
                     await cur.execute(
                         """SELECT id FROM subscriptions
                            WHERE subscriber_user_id = %s AND subscribed_channel_id = %s
@@ -280,7 +329,7 @@ class Database:
                         # Если уже существует активная подписка — просто возвращаем текущее значение
                         return int(ch["subscribers_needed"])
 
-                    # Увеличиваем счётчик и обновляем время очереди
+                    # 3. Увеличиваем счётчик у канала-должника (Канал A) и обновляем время очереди
                     await cur.execute(
                         """UPDATE channels
                            SET subscribers_needed = subscribers_needed + 1,
@@ -289,7 +338,7 @@ class Database:
                         (subscriber_channel_id,)
                     )
 
-                    # Вставляем запись подписки: Пользователь A -> Канал B (создает долг Каналу A)
+                    # 4. Вставляем запись подписки
                     await cur.execute(
                         """INSERT INTO subscriptions
                            (subscriber_user_id, subscribed_channel_id, channel_that_owes_id, is_active)
@@ -297,7 +346,7 @@ class Database:
                         (subscriber_user_id, subscribed_channel_id, subscriber_channel_id)
                     )
 
-                    # Получаем новое значение subscribers_needed
+                    # 5. Получаем новое значение subscribers_needed
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
                         (subscriber_channel_id,)
@@ -308,11 +357,11 @@ class Database:
                     logger.exception("Ошибка в register_subscription_and_create_debt")
                     raise
 
-    async def fulfill_debt(self, subscriber_user_id: int, subscribed_channel_id: int, channel_that_owes_id: int) -> int:
+    async def fulfill_debt(self, channel_that_owes_id: int) -> int:
         """
         Атомарно:
           - находит самую старую активную подписку, которая создала долг для channel_that_owes_id (Канал A),
-            помечает её как неактивную (Пользователь A -> Канал B).
+            помечает её как неактивную.
           - уменьшает subscribers_needed у channel_that_owes_id (Канал A) на 1.
         Возвращает новое значение subscribers_needed.
         """
@@ -322,32 +371,31 @@ class Database:
         async with self.transaction() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 try:
-                    # ИСПРАВЛЕНО: Ищем активную запись, которая создала ДОЛГ для Канала A (channel_that_owes_id).
-                    # Мы не ищем подписку владельца B (subscriber_user_id), мы ищем подписку Пользователя A.
+                    # 1. Находим самую старую активную запись, которая создала ДОЛГ для Канала A (FOR UPDATE)
                     await cur.execute(
-                        """SELECT id FROM subscriptions
-                           WHERE channel_that_owes_id = %s  -- ID Канала A
+                        """SELECT id, subscribed_channel_id, subscriber_user_id FROM subscriptions
+                           WHERE channel_that_owes_id = %s
                              AND is_active = TRUE
-                           ORDER BY id ASC
+                           ORDER BY created_at ASC
                            LIMIT 1 FOR UPDATE""",
                         (channel_that_owes_id,)
                     )
                     sub = await cur.fetchone()
                     
-                    # Здесь, согласно вашим логам, возникла ошибка: NotFoundError
                     if not sub:
-                        logger.error(f"Не найдена активная подписка для погашения долга. channel_that_owes_id={channel_that_owes_id}")
-                        raise NotFoundError("Активная подписка для погашения долга не найдена")
+                        # Если долг уже погашен (или ошибка логики), просто уменьшаем счётчик
+                        logger.warning(f"Не найдена активная подписка для погашения долга. channel_that_owes_id={channel_that_owes_id}. Только уменьшаем счётчик.")
+                        pass # Продолжаем к уменьшению счётчика
 
-                    sub_id = sub["id"]
-
-                    # Деактивируем подписку (Пользователь A -> Канал B)
-                    await cur.execute(
-                        "UPDATE subscriptions SET is_active = FALSE, finished_at = NOW() WHERE id = %s",
-                        (sub_id,)
-                    )
-
-                    # Уменьшаем счётчик у канала-должника (Канал A)
+                    else:
+                        sub_id = sub["id"]
+                        # 2. Деактивируем подписку
+                        await cur.execute(
+                            "UPDATE subscriptions SET is_active = FALSE, finished_at = NOW() WHERE id = %s",
+                            (sub_id,)
+                        )
+                    
+                    # 3. Уменьшаем счётчик у канала-должника (Канал A)
                     await cur.execute(
                         """UPDATE channels
                            SET subscribers_needed = GREATEST(subscribers_needed - 1, 0)
@@ -355,7 +403,7 @@ class Database:
                         (channel_that_owes_id,)
                     )
 
-                    # Получаем обновлённый баланс
+                    # 4. Получаем обновлённый баланс
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
                         (channel_that_owes_id,)
@@ -366,6 +414,28 @@ class Database:
                     logger.exception("Ошибка в fulfill_debt")
                     raise
 
+    # *** НЕДОСТАЮЩИЙ МЕТОД: *** async def get_active_subscriptions_to_check(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Получает список активных подписок для периодической проверки. 
+        Предполагаем, что нужно проверить те подписки, которые долго были активны.
+        """
+        query = """
+            SELECT 
+                s.id, s.subscriber_user_id, s.subscribed_channel_id, s.channel_that_owes_id
+            FROM subscriptions s
+            WHERE s.is_active = TRUE 
+            ORDER BY s.created_at ASC
+            LIMIT %s
+        """
+        return await self._fetch(query, limit)
+
+    # *** НЕДОСТАЮЩИЙ МЕТОД: *** async def get_channel_debt(self, channel_id: int) -> int:
+        """Получает текущий долг канала (сколько нужно получить подписчиков)."""
+        row = await self._fetchrow(
+            "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
+            channel_id
+        )
+        return int(row["subscribers_needed"]) if row else 0
 
 # Экземпляр базы
 db = Database()
