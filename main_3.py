@@ -233,21 +233,39 @@ async def process_channel_link(message: types.Message, state: FSMContext, bot: B
         await message.answer("❌ Вы находитесь в режиме регистрации канала. Отправьте, пожалуйста, только ссылку.")
         return
 
+    # Извлекаем чистое имя пользователя из ссылки
     match = re.search(r'(?:@|t\.me/|https://t\.me/)([A-Za-z0-9_]{5,32})', link, re.IGNORECASE)
+
     if not match:
         await message.answer("❌ Некорректный формат ссылки. Используйте @username или https://t.me/username.")
         return
 
-    channel_username = '@' + match.group(1)
+    channel_username = '@' + match.group(1) # Всегда работаем с @username
+
+    # --- ИСПРАВЛЕНИЕ: ПРОВЕРКА СУЩЕСТВОВАНИЯ КАНАЛА ---
+    if await db.get_user_channel_info(user_id):
+        await message.answer(
+            "ℹ️ Ваш канал уже зарегистрирован. Переходим к обмену.",
+            reply_markup=get_main_keyboard(is_registered=True)
+        )
+        await state.clear()
+        # Вызываем обмен, если пользователь по ошибке повторно отправил ссылку
+        await start_exchange_process(message, bot) 
+        return
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
 
     try:
+        # Проверка существования канала
         chat = await bot.get_chat(chat_id=channel_username)
         channel_id = chat.id
-
+        
+        # Проверка, что это канал, а не что-то другое
         if chat.type not in ('channel', 'supergroup'):
             await message.answer("❌ Это не похоже на канал или супергруппу. Пожалуйста, отправьте ссылку на канал.")
             return
 
+        # Проверка прав администратора бота
         try:
             bot_member = await bot.get_chat_member(chat_id=channel_id, user_id=(await bot.get_me()).id)
             if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
@@ -260,11 +278,13 @@ async def process_channel_link(message: types.Message, state: FSMContext, bot: B
         except Exception:
             logger.exception(f"Не удалось проверить права бота в канале {channel_username}.")
 
+        # Проверка, не зарегистрирован ли канал уже другим пользователем
         if await db.is_channel_registered_by_other(channel_id, user_id):
             await message.answer("❌ Этот канал уже зарегистрирован другим пользователем.")
             await state.clear()
             return
 
+        # --- КЛЮЧЕВОЙ ШАГ: РЕГИСТРАЦИЯ В БД ---
         await db.add_channel(user_id, channel_id, channel_username, chat.title)
         await state.clear()
 
