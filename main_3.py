@@ -3,6 +3,7 @@ import logging
 import re
 import os
 import contextlib
+# ВАЖНОЕ ИСПРАВЛЕНИЕ: Добавлен Dict в импорт
 from typing import Union, Optional, Any, Dict
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
@@ -413,7 +414,7 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Проверяю подписку...", show_alert=False)
     
     # 1. Проверка подписки
-    is_subscribed = await is_member_of_required_channel(bot, user_id) # Используем ту же функцию
+    is_subscribed = False
     # ПЕРЕОПРЕДЕЛЕНИЕ: Проверяем подписку на целевой канал
     try:
         member = await bot.get_chat_member(target_channel_id, user_id)
@@ -590,4 +591,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
-
