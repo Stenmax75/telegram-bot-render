@@ -3,7 +3,7 @@ import logging
 import re
 import os
 import contextlib
-# ВАЖНОЕ ИСПРАВЛЕНИЕ: Добавлен Dict в импорт
+# ВАЖНОЕ ИСПРАВЛЕНИЕ #1: Добавлен Dict
 from typing import Union, Optional, Any, Dict
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
@@ -21,8 +21,8 @@ from aiogram.fsm.storage.redis import RedisStorage, Redis
 
 # Конфиг и БД (убедитесь, что REQUIRED_CHANNEL_ID в config_1 - int)
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
-# Предполагается, что database.py предоставляет db и NotFoundError
-from database import db, NotFoundError
+# ВАЖНОЕ ИСПРАВЛЕНИЕ #2: Добавлен класс Database для тайп хинтов
+from database import db, NotFoundError, Database
 
 # --- КОНФИГУРАЦИЯ И ЗАПУСК ---\
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
