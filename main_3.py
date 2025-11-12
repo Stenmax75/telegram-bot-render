@@ -34,7 +34,15 @@ BOT_SUPPORT_CHANNEL_URL = f"https://t.me/{BOT_SUPPORT_CHANNEL_USERNAME.lstrip('@
 CHECK_INTERVAL_SECONDS = 300 # 5 минут
 
 # Инициализация Redis для FSM
-redis_storage = Redis(host=os.getenv("REDIS_HOST", "localhost"), port=os.getenv("REDIS_PORT", 6379))
+REDIS_DSN = os.getenv("REDIS_DSN") 
+
+if REDIS_DSN:
+    # Используем полный URI (DSN) для подключения к Redis (ИСПРАВЛЕНИЕ ОШИБКИ ПОДКЛЮЧЕНИЯ)
+    redis_storage = Redis.from_url(REDIS_DSN) 
+else:
+    # Fallback к старому способу через HOST/PORT или localhost
+    redis_storage = Redis(host=os.getenv("REDIS_HOST", "localhost"), port=os.getenv("REDIS_PORT", 6379))
+    
 storage = RedisStorage(redis_storage)
 
 # Инициализация бота и диспетчера
