@@ -1,7 +1,7 @@
 import aiomysql
 import logging
 import ssl
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List # <-- Добавлено List
 from contextlib import asynccontextmanager
 # Импортируем, как в вашем исходном коде
 from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT 
@@ -238,22 +238,42 @@ class Database:
             return False
 
 
-    async def get_target_channel(self, user_id: int) -> Optional[Dict[str, Any]]:
+    # ИЗМЕНЕННАЯ ФУНКЦИЯ ДЛЯ ПОСЛЕДОВАТЕЛЬНОГО ПРЕДЛОЖЕНИЯ КАНАЛОВ
+    async def get_target_channel(self, user_id: int, excluded_channel_ids: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
         """
-        Возвращает один канал-цель (для подписки пользователем user_id),
-        который не принадлежит user_id и на который этот пользователь ещё не подписывался (активно).
+        Находит канал для обмена, исключая собственный, уже подписанные 
+        и временно исключенные (excluded_channel_ids).
         """
-        query = """
-            SELECT c.channel_id, c.link, c.title
-            FROM channels c
-            LEFT JOIN subscriptions s ON c.channel_id = s.subscribed_channel_id
-                AND s.subscriber_user_id = %s AND s.is_active = TRUE
-            WHERE c.owner_id != %s
-              AND s.id IS NULL
-            ORDER BY c.subscribers_needed ASC, c.queue_join_time ASC
-            LIMIT 1
+        if excluded_channel_ids is None:
+            excluded_channel_ids = []
+
+        sql_base = """
+        SELECT c.channel_id, c.link, c.title, c.subscribers_needed
+        FROM channels c
+        LEFT JOIN subscriptions s
+            ON s.subscribed_channel_id = c.channel_id
+            AND s.subscriber_user_id = %s
+            AND s.is_active = TRUE
+        WHERE 
+            c.owner_id != %s -- Исключаем собственный канал
+            AND s.id IS NULL -- Исключаем каналы, на которые уже активно подписан
         """
-        return await self._fetchrow(query, user_id, user_id)
+        
+        params = [user_id, user_id]
+        
+        # ЛОГИКА ИСКЛЮЧЕНИЯ: Добавляем условие NOT IN для временно предложенных каналов
+        if excluded_channel_ids:
+            # Создаем строку плейсхолдеров (%s) для NOT IN
+            placeholders = ', '.join(['%s'] * len(excluded_channel_ids))
+            sql_base += f" AND c.channel_id NOT IN ({placeholders})"
+            params.extend(excluded_channel_ids)
+            
+        sql_base += """
+        ORDER BY c.subscribers_needed ASC, c.queue_join_time ASC
+        LIMIT 1
+        """
+        
+        return await self._fetchrow(sql_base, *params)
 
     async def get_channel_owner_info(self, channel_id: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о владельце канала."""
@@ -318,9 +338,9 @@ class Database:
                     # чтобы предотвратить некорректное поведение при переподписке/ошибке.
                     await cur.execute(
                         """SELECT id FROM subscriptions
-                           WHERE subscriber_user_id = %s AND subscribed_channel_id = %s
-                             AND is_active = TRUE
-                           FOR UPDATE""",
+                            WHERE subscriber_user_id = %s AND subscribed_channel_id = %s
+                              AND is_active = TRUE
+                            FOR UPDATE""",
                         (subscriber_user_id, subscribed_channel_id)
                     )
                     existing = await cur.fetchone()
@@ -331,17 +351,17 @@ class Database:
                     # 3. Увеличиваем счётчик у канала-должника (Канал A) и обновляем время очереди
                     await cur.execute(
                         """UPDATE channels
-                           SET subscribers_needed = subscribers_needed + 1,
-                               queue_join_time = NOW()
-                           WHERE channel_id = %s""",
+                            SET subscribers_needed = subscribers_needed + 1,
+                                queue_join_time = NOW()
+                            WHERE channel_id = %s""",
                         (subscriber_channel_id,)
                     )
 
                     # 4. Вставляем запись подписки (channel_that_owes_id = Канал A)
                     await cur.execute(
                         """INSERT INTO subscriptions
-                           (subscriber_user_id, subscribed_channel_id, channel_that_owes_id, is_active)
-                           VALUES (%s, %s, %s, TRUE)""",
+                            (subscriber_user_id, subscribed_channel_id, channel_that_owes_id, is_active)
+                            VALUES (%s, %s, %s, TRUE)""",
                         (subscriber_user_id, subscribed_channel_id, subscriber_channel_id)
                     )
 
@@ -373,10 +393,10 @@ class Database:
                     # 1. Находим самую старую активную запись, которая создала ДОЛГ для Канала A (FOR UPDATE)
                     await cur.execute(
                         """SELECT id, subscribed_channel_id, subscriber_user_id FROM subscriptions
-                           WHERE channel_that_owes_id = %s
-                             AND is_active = TRUE
-                           ORDER BY created_at ASC
-                           LIMIT 1 FOR UPDATE""",
+                            WHERE channel_that_owes_id = %s
+                              AND is_active = TRUE
+                            ORDER BY created_at ASC
+                            LIMIT 1 FOR UPDATE""",
                         (channel_that_owes_id,)
                     )
                     sub = await cur.fetchone()
@@ -397,8 +417,8 @@ class Database:
                     # 3. Уменьшаем счётчик у канала-должника (Канал A)
                     await cur.execute(
                         """UPDATE channels
-                           SET subscribers_needed = GREATEST(subscribers_needed - 1, 0)
-                           WHERE channel_id = %s""",
+                            SET subscribers_needed = GREATEST(subscribers_needed - 1, 0)
+                            WHERE channel_id = %s""",
                         (channel_that_owes_id,)
                     )
 
