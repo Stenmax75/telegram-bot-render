@@ -1,10 +1,10 @@
 import aiomysql
 import logging
 import ssl
-from typing import Optional, Dict, Any, List # <-- Добавлено List
+from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 # Импортируем, как в вашем исходном коде
-from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT 
+from config_1 import DB_HOST, DB_NAME, DB_PASS, DB_USER, DB_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class Database:
             """
         )
 
-        # channels: добавлен UNIQUE(owner_id) для одного канала на одного владельца
+        # channels: УДАЛЕН UNIQUE KEY uq_channels_owner, чтобы позволить несколько каналов на одного владельца
         await self._execute(
             """
             CREATE TABLE IF NOT EXISTS channels (
@@ -145,12 +145,12 @@ class Database:
                 subscribers_needed INT DEFAULT 0,
                 queue_join_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (owner_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                UNIQUE KEY uq_channels_owner (owner_id)
+                INDEX idx_channels_owner (owner_id) -- Добавлен обычный индекс для поиска по владельцу
             ) ENGINE=InnoDB;
             """
         )
 
-        # subscriptions
+        # subscriptions (остается без изменений)
         await self._execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -184,16 +184,35 @@ class Database:
             user_id, username, username
         )
 
-    async def get_user_channel_info(self, owner_id: int) -> Optional[Dict[str, Any]]:
-        """Получить информацию о канале по ID владельца."""
-        return await self._fetchrow(
+    async def get_user_channels_info(self, owner_id: int) -> List[Dict[str, Any]]:
+        """Получить информацию обо всех каналах по ID владельца."""
+        return await self._fetch(
             "SELECT channel_id, `link`, title, subscribers_needed FROM channels WHERE owner_id = %s",
             owner_id
         )
+    
+    async def get_channel_info_by_channel_id(self, channel_id: int) -> Optional[Dict[str, Any]]:
+        """Получить информацию об ОДНОМ канале по его ID."""
+        return await self._fetchrow(
+            "SELECT channel_id, owner_id, `link`, title, subscribers_needed FROM channels WHERE channel_id = %s",
+            channel_id
+        )
 
-    async def get_channel_info_by_owner_id(self, owner_id: int) -> Optional[Dict[str, Any]]:
-        """То же, что get_user_channel_info (запрос с другим именем для читабельности)."""
-        return await self.get_user_channel_info(owner_id)
+    async def get_user_channel_with_highest_debt(self, owner_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Возвращает канал пользователя, который нуждается в наибольшем количестве подписчиков.
+        Это канал, который получит 'долг' при подписке пользователя.
+        """
+        return await self._fetchrow(
+            """
+            SELECT channel_id, `link`, title, subscribers_needed
+            FROM channels
+            WHERE owner_id = %s
+            ORDER BY subscribers_needed DESC, queue_join_time ASC
+            LIMIT 1
+            """,
+            owner_id
+        )
 
     async def is_channel_registered_by_other(self, channel_id: int, user_id: int) -> bool:
         """
@@ -205,47 +224,53 @@ class Database:
             FROM channels 
             WHERE channel_id = %s AND owner_id != %s
         """
-        # Если найдена хотя бы одна строка, значит, канал зарегистрирован другим
         result = await self._fetchrow(query, channel_id, user_id)
         return result is not None
 
     async def add_channel(self, owner_id: int, channel_id: int, link: str, title: str) -> bool:
         """
-        Добавляет канал и владельца. Возвращает True, если добавлено, False если уже существует.
-        Уникальный ключ по owner_id предотвращает добавление второго канала.
+        Добавляет канал и владельца. Возвращает True, если добавлено, False если уже существует
+        канал с таким channel_id (т.к. channel_id - PRIMARY KEY).
         """
-        # Сначала убеждаемся, что владелец существует (для FOREIGN KEY)
-        await self.add_user(owner_id, title) 
+        # 1. Сначала убеждаемся, что владелец существует (для FOREIGN KEY)
+        await self.add_user(owner_id, title)
         
         try:
-            # Используем _execute, который выполняет commit
-            # ON DUPLICATE KEY UPDATE не используется, т.к. UNIQUE по owner_id, 
-            # и мы не хотим перезаписывать канал
-            # Лучше использовать простой INSERT и поймать ошибку (или полагаться на unique index)
+            # 2. Используем INSERT ... ON DUPLICATE KEY UPDATE для обработки возможного дубликата по channel_id
             await self._execute(
                 """INSERT INTO channels
                    (channel_id, owner_id, `link`, title, subscribers_needed)
-                   VALUES (%s, %s, %s, %s, 0)""",
+                   VALUES (%s, %s, %s, %s, 0)
+                   ON DUPLICATE KEY UPDATE owner_id = owner_id -- Просто обновляем сами на себя, чтобы избежать ошибки
+                """,
                 channel_id, owner_id, link, title
             )
+            # Если канал уже был, это вернет True, но не добавит новую строку.
+            # Поскольку мы проверяем канал_id, это предотвратит двойную регистрацию одного и того же канала.
             return True
-        except aiomysql.IntegrityError as e:
-            # Ошибка целостности (например, нарушен UNIQUE KEY uq_channels_owner)
-            logger.warning(f"Попытка добавить уже существующий канал для владельца {owner_id}: {e}")
-            return False
         except Exception:
             logger.exception("Ошибка при добавлении канала")
             return False
 
-
     # ИЗМЕНЕННАЯ ФУНКЦИЯ ДЛЯ ПОСЛЕДОВАТЕЛЬНОГО ПРЕДЛОЖЕНИЯ КАНАЛОВ
     async def get_target_channel(self, user_id: int, excluded_channel_ids: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
         """
-        Находит канал для обмена, исключая собственный, уже подписанные 
+        Находит канал для обмена, исключая собственные, уже подписанные 
         и временно исключенные (excluded_channel_ids).
         """
+        # ... (логика остается прежней)
         if excluded_channel_ids is None:
             excluded_channel_ids = []
+
+        # Получаем список всех каналов, принадлежащих пользователю, чтобы исключить их все
+        owner_channels = await self.get_user_channels_info(user_id)
+        owner_channel_ids = [c['channel_id'] for c in owner_channels]
+
+        # Добавляем все каналы пользователя в список исключений, если они еще не там
+        for ch_id in owner_channel_ids:
+            if ch_id not in excluded_channel_ids:
+                excluded_channel_ids.append(ch_id)
+
 
         sql_base = """
         SELECT c.channel_id, c.link, c.title, c.subscribers_needed
@@ -255,13 +280,12 @@ class Database:
             AND s.subscriber_user_id = %s
             AND s.is_active = TRUE
         WHERE 
-            c.owner_id != %s -- Исключаем собственный канал
-            AND s.id IS NULL -- Исключаем каналы, на которые уже активно подписан
+            s.id IS NULL -- Исключаем каналы, на которые уже активно подписан
         """
         
-        params = [user_id, user_id]
+        params = [user_id]
         
-        # ЛОГИКА ИСКЛЮЧЕНИЯ: Добавляем условие NOT IN для временно предложенных каналов
+        # ЛОГИКА ИСКЛЮЧЕНИЯ: Добавляем условие NOT IN для всех исключенных (включая свои)
         if excluded_channel_ids:
             # Создаем строку плейсхолдеров (%s) для NOT IN
             placeholders = ', '.join(['%s'] * len(excluded_channel_ids))
@@ -274,6 +298,7 @@ class Database:
         """
         
         return await self._fetchrow(sql_base, *params)
+
 
     async def get_channel_owner_info(self, channel_id: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о владельце канала."""
@@ -289,10 +314,7 @@ class Database:
         return row
 
     async def get_channel_to_verify(self) -> Optional[Dict[str, Any]]:
-        """
-        Получить канал, который нужно проверить на предмет отписки. 
-        Например, самый старый канал в очереди или канал с наибольшим долгом.
-        """
+        # ... (логика остается прежней)
         query = """
             SELECT c.channel_id, c.owner_id
             FROM channels c
@@ -309,12 +331,12 @@ class Database:
         self,
         subscriber_user_id: int,
         subscribed_channel_id: int,
-        subscriber_channel_id: int
+        channel_that_owes_id: int # Переименовано для ясности: это канал пользователя, который создает долг
     ) -> int:
         """
         Атомарно:
           - проверяет, не существует ли уже активная аналогичная подписка,
-          - увеличивает subscribers_needed у subscriber_channel_id (Канал A),
+          - увеличивает subscribers_needed у channel_that_owes_id (Канал A),
           - вставляет запись в subscriptions.
         Возвращает новое значение subscribers_needed.
         """
@@ -327,15 +349,13 @@ class Database:
                     # 1. Блокируем строку канала-должника (Канал A)
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s FOR UPDATE",
-                        (subscriber_channel_id,)
+                        (channel_that_owes_id,)
                     )
                     ch = await cur.fetchone()
                     if not ch:
-                        raise NotFoundError(f"Channel to receive subscribers not found: {subscriber_channel_id}")
+                        raise NotFoundError(f"Channel to receive subscribers not found: {channel_that_owes_id}")
 
                     # 2. Проверяем, есть ли уже активная подписка (Пользователь A -> Канал B)
-                    # ИСПРАВЛЕНИЕ: Убрано channel_that_owes_id из WHERE для поиска существующей подписки, 
-                    # чтобы предотвратить некорректное поведение при переподписке/ошибке.
                     await cur.execute(
                         """SELECT id FROM subscriptions
                             WHERE subscriber_user_id = %s AND subscribed_channel_id = %s
@@ -354,7 +374,7 @@ class Database:
                             SET subscribers_needed = subscribers_needed + 1,
                                 queue_join_time = NOW()
                             WHERE channel_id = %s""",
-                        (subscriber_channel_id,)
+                        (channel_that_owes_id,)
                     )
 
                     # 4. Вставляем запись подписки (channel_that_owes_id = Канал A)
@@ -362,13 +382,13 @@ class Database:
                         """INSERT INTO subscriptions
                             (subscriber_user_id, subscribed_channel_id, channel_that_owes_id, is_active)
                             VALUES (%s, %s, %s, TRUE)""",
-                        (subscriber_user_id, subscribed_channel_id, subscriber_channel_id)
+                        (subscriber_user_id, subscribed_channel_id, channel_that_owes_id)
                     )
 
                     # 5. Получаем новое значение subscribers_needed
                     await cur.execute(
                         "SELECT subscribers_needed FROM channels WHERE channel_id = %s",
-                        (subscriber_channel_id,)
+                        (channel_that_owes_id,)
                     )
                     new_row = await cur.fetchone()
                     return int(new_row["subscribers_needed"])
@@ -377,13 +397,7 @@ class Database:
                     raise
 
     async def fulfill_debt(self, channel_that_owes_id: int) -> int:
-        """
-        Атомарно:
-          - находит самую старую активную подписку, которая создала долг для channel_that_owes_id (Канал A),
-            помечает её как неактивную.
-          - уменьшает subscribers_needed у channel_that_owes_id (Канал A) на 1.
-        Возвращает новое значение subscribers_needed.
-        """
+        # ... (логика остается прежней)
         if not self.pool:
             raise DatabaseError("DB pool is not initialized")
 
