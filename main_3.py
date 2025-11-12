@@ -3,7 +3,7 @@ import logging
 import re
 import os
 import contextlib
-from typing import Union, Optional, Any
+from typing import Union, Optional, Any, Dict
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -590,3 +590,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
