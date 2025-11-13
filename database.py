@@ -219,9 +219,10 @@ class Database:
         Проверяет, зарегистрирован ли канал с данным channel_id и принадлежит ли он 
         другому пользователю (owner_id != user_id).
         """
+        # ИСПРАВЛЕНО: УДАЛЕН НЕРАЗРЫВНЫЙ ПРОБЕЛ ИЗ `owner_id`
         query = """
-            SELECT owner_id 
-            FROM channels 
+            SELECT owner_id
+            FROM channels
             WHERE channel_id = %s AND owner_id != %s
         """
         result = await self._fetchrow(query, channel_id, user_id)
@@ -239,10 +240,11 @@ class Database:
             # 2. Используем INSERT ... ON DUPLICATE KEY UPDATE для обработки возможного дубликата по channel_id
             await self._execute(
                 """INSERT INTO channels
-                   (channel_id, owner_id, `link`, title, subscribers_needed)
-                   VALUES (%s, %s, %s, %s, 0)
-                   ON DUPLICATE KEY UPDATE owner_id = owner_id -- Просто обновляем сами на себя, чтобы избежать ошибки
+                    (channel_id, owner_id, `link`, title, subscribers_needed)
+                    VALUES (%s, %s, %s, %s, 0)
+                    ON DUPLICATE KEY UPDATE owner_id = owner_id
                 """,
+                # Убеждаемся, что переменные передаются в правильном порядке
                 channel_id, owner_id, link, title
             )
             # Если канал уже был, это вернет True, но не добавит новую строку.
