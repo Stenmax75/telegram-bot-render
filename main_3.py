@@ -179,11 +179,34 @@ async def get_channel_info_from_input(bot: Bot, input_text: str) -> Optional[Dic
             'title': chat.title
         }
     except TelegramBadRequest as e:
-        logger.warning(f"Ошибка Telegram при получении info о канале {channel_identifier}: {e.message}")
-        return None
-    except Exception as e:
-        logger.exception(f"Непредвиденная ошибка при получении info о канале: {e}")
-        return None
+        error_msg = str(e)
+        logger.error(f"TelegramBadRequest в process_channel_link: {error_msg}")
+
+        # Добавляем специфическую проверку на ошибку, которую вы наблюдаете
+        if "invalid user_id specified" in error_msg:
+             # Специальное сообщение, указывающее на проблему с ID/Username
+            await message.answer(
+                f"❌ Telegram API Ошибка: **Не найден канал по адресу** <code>{channel_username}</code>. \n\n"
+                f"Убедитесь, что: \n"
+                f"1. Публичное имя **абсолютно** правильное.\n"
+                f"2. Канал **действительно публичный** в данный момент.\n"
+                f"3. Как альтернативу, попробуйте отправить **всю ссылку-приглашение** или **ID канала** (например, `-100...`)."
+            )
+        elif "chat not found" in error_msg.lower():
+            # Это еще одна возможная ошибка при поиске чата
+            await message.answer(
+                f"❌ Канал не найден. Проверьте правильность адреса <code>{channel_username}</code>. "
+                f"Убедитесь, что канал публичный."
+            )
+        else:
+            # Общее сообщение для всех остальных ошибок Telegram
+            await message.answer(
+                f"❌ Telegram API Ошибка: <b>{error_msg}</b>\n\n"
+                f"Убедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора."
+            )
+        
+        await state.clear()
+        return
 
 
 # --- HANDLERS ---
@@ -599,3 +622,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
