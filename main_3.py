@@ -8,7 +8,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-# УДАЛЕН ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -17,14 +16,12 @@ from datetime import timedelta
 
 # REDIS / STORAGE
 from aiogram.fsm.storage.redis import RedisStorage, Redis
-# from aiogram.fsm.storage.memory import MemoryStorage # Не нужен, если используем Redis/Fallback
 
 # Конфиг и БД (убедитесь, что REQUIRED_CHANNEL_ID в config_1 - int)
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
-# ВАЖНОЕ ИСПРАВЛЕНИЕ #2: Добавлен класс Database для тайп хинтов
-from database import db, NotFoundError, Database
+from database import db, NotFoundError, Database # Добавлен Database
 
-# --- КОНФИГУРАЦИЯ И ЗАПУСК ---\
+# --- КОНФИГУРАЦИЯ И ЗАПУСК ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -59,21 +56,15 @@ class UnsubSkip(StatesGroup):
 
 # --- KEYBOARDS ---
 
-# ИЗМЕНЕНИЕ: Теперь это Inline-клавиатура
 def get_main_menu_keyboard(has_channels: bool) -> types.InlineKeyboardMarkup:
     """Генерирует основное меню (Inline)."""
     builder = InlineKeyboardBuilder() 
     builder.button(text="➕ Получить Подписчика", callback_data="start_get_sub")
     builder.button(text="📋 Мои Каналы", callback_data="show_my_channels")
-    if has_channels:
-        # Удалил "❌ Удалить Канал" из главного меню, переместив его в "Мои Каналы"
-        pass
-    # Добавил кнопку поддержки, чтобы меню не было пустым
     builder.button(text="ℹ️ Поддержка", url=BOT_SUPPORT_CHANNEL_URL)
     builder.adjust(2)
     return builder.as_markup()
 
-# ИЗМЕНЕНИЕ: Обновлен "Назад", чтобы возвращать к главному меню
 def get_back_button() -> types.InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад в Меню", callback_data="main_menu")
@@ -87,7 +78,6 @@ def get_channel_control_keyboard(channels) -> types.InlineKeyboardMarkup:
         button_text = f"⚙️ {channel['title']} ({debt}👤)"
         builder.button(text=button_text, callback_data=f"manage_channel_{channel['channel_id']}")
     
-    # Кнопка удаления канала в этом меню (если каналы есть)
     if channels:
         builder.button(text="❌ Удалить Канал", callback_data="delete_channel_start")
         
@@ -127,13 +117,21 @@ async def is_member_of_required_channel(bot: Bot, user_id: int) -> bool:
         logger.exception("Ошибка при проверке подписки на обязательный канал")
         return False
 
-# (Остальные хелперы - is_bot_admin_in_channel, get_channel_info_from_input - остаются без изменений)
+# ИСПРАВЛЕНИЯ #2 И #5: Корректная проверка прав администратора и права на приглашение
 async def is_bot_admin_in_channel(bot: Bot, chat_id: Union[int, str]) -> bool:
     """Проверяет, является ли бот администратором канала с правами на приглашение."""
     try:
         member = await bot.get_chat_member(chat_id, bot.id)
-        if member.status != ChatMemberStatus.ADMINISTRATOR and member.status != ChatMemberStatus.CREATOR:
+        
+        # ИСПРАВЛЕНИЕ #2: Корректная проверка статуса
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
             return False
+            
+        # ИСПРАВЛЕНИЕ #5: Проверка права на приглашение (can_invite_users)
+        # Создатель всегда имеет все права.
+        if member.status == ChatMemberStatus.ADMINISTRATOR and not member.can_invite_users:
+             return False
+        
         return True
     except TelegramBadRequest as e:
         logger.warning(f"Ошибка проверки прав бота в канале {chat_id}: {e}")
@@ -142,85 +140,68 @@ async def is_bot_admin_in_channel(bot: Bot, chat_id: Union[int, str]) -> bool:
         logger.exception(f"Непредвиденная ошибка проверки прав бота: {e}")
         return False
 
+# ИСПРАВЛЕНИЯ #1, #4 и #6: Удалены message.answer, упрощена проверка и убран лишний get_chat_member
 async def get_channel_info_from_input(bot: Bot, input_text: str) -> Optional[Dict[str, Any]]:
     """Извлекает ID/Username канала и получает его основную информацию."""
-    match = re.search(r'(?:t\.me/|@|t\.me/joinchat/|telegram\.me/joinchat/|t\.me/\+)?([a-zA-Z0-9_]+)$', input_text)
     channel_identifier = None
+    
+    # Пытаемся извлечь идентификатор (username или ID)
+    match = re.search(r'(?:t\.me/|@|t\.me/joinchat/|telegram\.me/joinchat/|t\.me/\+)?([a-zA-Z0-9_]+)$', input_text)
+    
     if match:
         channel_identifier = match.group(1)
+        if not channel_identifier.startswith('@') and not channel_identifier.isdigit():
+            channel_identifier = '@' + channel_identifier
+    elif input_text.startswith('-100') and input_text[1:].isdigit():
+        channel_identifier = int(input_text)
+    elif input_text.startswith('@'):
+        channel_identifier = input_text
     else:
-        if input_text.startswith('-100') and input_text[1:].isdigit():
-             channel_identifier = int(input_text)
-        elif input_text.startswith('@'):
-             channel_identifier = input_text
-        else:
-             return None 
-    
-    if isinstance(channel_identifier, str) and not channel_identifier.startswith('@') and not channel_identifier.isdigit():
-        channel_identifier = '@' + channel_identifier
-    
+        return None # Некорректный формат
+
     try:
         chat = await bot.get_chat(chat_id=channel_identifier)
         
         if chat.type not in ['channel', 'supergroup']:
-            return None 
+            return None # Не канал/супергруппа
             
-        link = chat.username if chat.username else f"https://t.me/c/{str(chat.id).replace('-100', '')}"
-        username = chat.username if chat.username else None
-        
-        member = await bot.get_chat_member(chat.id, chat.id)
-        if member.status != ChatMemberStatus.CREATOR and member.status != ChatMemberStatus.ADMINISTRATOR:
-            return None 
+        # 1. Проверяем, что бот является администратором и имеет право на приглашение
+        if not await is_bot_admin_in_channel(bot, chat.id):
+            return None # Бот не админ или не имеет нужных прав
+            
+        # 2. Создаем ссылку (t.me/username или t.me/c/ID)
+        if chat.username:
+             link = f"https://t.me/{chat.username.lstrip('@')}"
+        else:
+             # Это приватный канал, но мы не можем получить полную ссылку, только t.me/c/ID
+             link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
 
         return {
             'channel_id': chat.id,
-            'link': f"https://t.me/{link.lstrip('@')}" if link.startswith('@') else link,
-            'username': username,
+            'link': link,
+            'username': chat.username,
             'title': chat.title
         }
-    except TelegramBadRequest as e:
-        error_msg = str(e)
-        logger.error(f"TelegramBadRequest в process_channel_link: {error_msg}")
-
-        # Добавляем специфическую проверку на ошибку, которую вы наблюдаете
-        if "invalid user_id specified" in error_msg:
-             # Специальное сообщение, указывающее на проблему с ID/Username
-            await message.answer(
-                f"❌ Telegram API Ошибка: **Не найден канал по адресу** <code>{channel_username}</code>. \n\n"
-                f"Убедитесь, что: \n"
-                f"1. Публичное имя **абсолютно** правильное.\n"
-                f"2. Канал **действительно публичный** в данный момент.\n"
-                f"3. Как альтернативу, попробуйте отправить **всю ссылку-приглашение** или **ID канала** (например, `-100...`)."
-            )
-        elif "chat not found" in error_msg.lower():
-            # Это еще одна возможная ошибка при поиске чата
-            await message.answer(
-                f"❌ Канал не найден. Проверьте правильность адреса <code>{channel_username}</code>. "
-                f"Убедитесь, что канал публичный."
-            )
-        else:
-            # Общее сообщение для всех остальных ошибок Telegram
-            await message.answer(
-                f"❌ Telegram API Ошибка: <b>{error_msg}</b>\n\n"
-                f"Убедитесь, что: \n1. Канал публичный и активен. \n2. Бот имеет все необходимые права администратора."
-            )
         
-        await state.clear()
-        return
+    except TelegramBadRequest as e:
+        logger.error(f"TelegramBadRequest в get_channel_info_from_input (Input: {input_text}): {e}")
+        return None # ИСПРАВЛЕНИЕ #1: Возвращаем None вместо message.answer
+        
+    except Exception as e:
+        logger.exception(f"Непредвиденная ошибка в get_channel_info_from_input: {e}")
+        return None # ИСПРАВЛЕНИЕ #1: Возвращаем None
 
 
 # --- HANDLERS ---
 
-# 1. /start
+# 1. /start (Остается без изменений)
 @dp.message(Command("start"))
 async def start_command(message: types.Message, state: FSMContext):
     await state.clear()
     await db.add_user(message.from_user.id, message.from_user.username)
     
-    # Удаляем Reply-клавиатуру, если она была, чтобы не мешала
     await message.answer("...", reply_markup=types.ReplyKeyboardRemove())
     
-    # Проверка подписки на обязательный канал
     if not await is_member_of_required_channel(bot, message.from_user.id):
         await message.answer(
             f"👋 Добро пожаловать!\n\nДля начала работы необходимо подписаться на наш основной канал:",
@@ -228,7 +209,6 @@ async def start_command(message: types.Message, state: FSMContext):
         )
         return
 
-    # Получаем каналы пользователя для отображения меню
     user_channels = await db.get_user_channels_info(message.from_user.id)
     has_channels = len(user_channels) > 0
     
@@ -237,7 +217,7 @@ async def start_command(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu_keyboard(has_channels)
     )
 
-# 2. Обработка проверки обязательной подписки
+# 2. Обработка проверки обязательной подписки (Остается без изменений)
 @dp.callback_query(F.data == "check_required_sub")
 async def process_check_required_sub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -255,7 +235,7 @@ async def process_check_required_sub(callback: types.CallbackQuery):
     else:
         await callback.answer("❌ Подписка не найдена. Пожалуйста, подпишитесь.")
 
-# 3. "Назад в Меню" (main_menu)
+# 3. "Назад в Меню" (main_menu) (Остается без изменений)
 @dp.callback_query(F.data == "main_menu")
 async def process_main_menu_callback(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -269,7 +249,7 @@ async def process_main_menu_callback(callback: types.CallbackQuery, state: FSMCo
         reply_markup=get_main_menu_keyboard(has_channels)
     )
 
-# 4. "📋 Мои Каналы" (show_my_channels)
+# 4. "📋 Мои Каналы" (show_my_channels) (Остается без изменений)
 @dp.callback_query(F.data == "show_my_channels")
 async def show_my_channels(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -297,9 +277,8 @@ async def show_my_channels(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(text, reply_markup=keyboard)
         
 
-# 5. "➕ Зарегистрировать Новый" (register_new_channel_start)
-# ИЗМЕНЕНИЕ: Обработчик теперь ловит callback_data
-@dp.callback_query(F.data.in_(["register_new_channel_start", "delete_channel_start"])) # Удаление тоже начнем отсюда
+# 5. "➕ Зарегистрировать Новый" (register_new_channel_start) (Остается без изменений)
+@dp.callback_query(F.data.in_(["register_new_channel_start", "delete_channel_start"]))
 async def start_registering_channel(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = callback.from_user.id
@@ -313,8 +292,8 @@ async def start_registering_channel(callback: types.CallbackQuery, state: FSMCon
         return
 
     await callback.message.edit_text(
-        "Отправьте мне ссылку (@username) или публичную ссылку-приглашение на ваш **публичный** канал.\n\n"
-        "**Важно:** Бот должен быть администратором в этом канале.",
+        "Отправьте мне ссылку (@username), ID канала (например, -100...) или публичную ссылку-приглашение на ваш **публичный** канал.\n\n"
+        "**Важно:** Бот должен быть администратором в этом канале **с правом на приглашение пользователей**.",
         reply_markup=get_back_button()
     )
     await state.set_state(ChannelRegistration.waiting_for_channel)
@@ -322,22 +301,24 @@ async def start_registering_channel(callback: types.CallbackQuery, state: FSMCon
 
 # 6. Обработка введенной ссылки (ChannelRegistration.waiting_for_channel)
 @dp.message(ChannelRegistration.waiting_for_channel)
-async def process_channel_id_or_username(message: types.Message, state: FSMContext):
+async def process_channel_id_or_username(message: types.Message, state: FSMContext, bot: Bot):
     user_id = message.from_user.id
     input_text = message.text
     
-    await state.clear() 
-
+    # ИСПРАВЛЕНИЕ #3: Удален state.clear() из начала функции
+    
     # 1. Проверка формата и получение информации о канале
     channel_info = await get_channel_info_from_input(bot, input_text)
     
     if channel_info is None:
         await message.answer(
-            "❌ Некорректный формат ссылки/username или бот не является администратором в канале. Попробуйте снова или нажмите '⬅️ Назад в Меню'.",
+            "❌ Некорректный формат адреса, канал не найден, **ЛИБО БОТ НЕ ЯВЛЯЕТСЯ АДМИНИСТРАТОРОМ С ПРАВОМ НА ПРИГЛАШЕНИЕ**. Попробуйте снова.",
             reply_markup=get_back_button()
         )
-        await state.set_state(ChannelRegistration.waiting_for_channel)
         return
+        
+    # Сброс состояния, только если канал успешно распознан и валиден
+    await state.clear() 
 
     channel_id = channel_info['channel_id']
     channel_title = channel_info['title']
@@ -373,8 +354,8 @@ async def process_channel_id_or_username(message: types.Message, state: FSMConte
             reply_markup=get_back_button()
         )
 
-# 7. "➕ Получить Подписчика" (start_get_sub)
-# ИЗМЕНЕНИЕ: Обработчик теперь ловит callback_data
+
+# 7. "➕ Получить Подписчика" (start_get_sub) (Остается без изменений)
 @dp.callback_query(F.data == "start_get_sub")
 async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -388,7 +369,6 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
         )
         return
         
-    # 1. Проверка наличия зарегистрированных каналов у пользователя
     user_channels = await db.get_user_channels_info(user_id)
     if not user_channels:
         await callback.message.edit_text(
@@ -397,16 +377,14 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
         )
         return
         
-    # 2. Выбор канала, который получит "долг" (Канал A)
     channel_to_receive_sub = await db.get_user_channel_with_highest_debt(user_id)
     if not channel_to_receive_sub:
-         await callback.message.edit_text(
+        await callback.message.edit_text(
             "❌ Не удалось определить ваш канал, который должен получить подписчика. Пожалуйста, обратитесь в поддержку.",
             reply_markup=get_back_button()
         )
-         return
+        return
     
-    # 3. Получение следующего канала для подписки (Канал B)
     state_data = await state.get_data()
     excluded_ids = state_data.get('excluded_channel_ids', [])
     
@@ -421,13 +399,11 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # Сохраняем информацию о текущей задаче
     await state.update_data(
         target_channel_id=target_channel['channel_id'],
         channel_to_receive_sub_id=channel_to_receive_sub['channel_id']
     )
     
-    # 4. Отправка предложения
     await callback.message.edit_text(
         f"➡️ **Ваше задание:**\n"
         f"Подпишитесь на канал **{target_channel['title']}** (долг: {target_channel['subscribers_needed']}👤).\n\n"
@@ -435,11 +411,9 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_sub_keyboard(target_channel['link'], target_channel['channel_id'])
     )
 
-# (Обработчики check_subscription, skip_subscription и фоновая задача check_for_unsubs остаются без изменений, так как они уже используют Inline-клавиатуры или не связаны с меню)
-
+# 8. check_subscription (Остается без изменений)
 @dp.callback_query(F.data.startswith("check_sub_"))
 async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
-    # ... (логика остается прежней)
     user_id = callback.from_user.id
     target_channel_id = int(callback.data.split('_')[2])
     
@@ -497,6 +471,7 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_main_menu_keyboard(True)
     )
 
+# 9. skip_subscription (Остается без изменений)
 @dp.callback_query(F.data == "skip_sub")
 async def skip_subscription(callback: types.CallbackQuery, state: FSMContext):
     
@@ -515,7 +490,6 @@ async def skip_subscription(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Канал пропущен.", show_alert=False)
     await callback.message.delete()
     
-    # Вызываем функцию получения следующей подписки, используя текущее состояние с исключениями
     await start_get_sub(callback, state)
 
 
@@ -597,6 +571,16 @@ async def check_for_unsubs(bot: Bot, db: Database):
         except Exception:
             logger.exception("Фоновая задача завершилась с ошибкой.")
 
+# --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
+@dp.errors()
+async def errors_handler(exception: Exception, event: types.error_event.ErrorEvent):
+    """
+    Глобальный обработчик ошибок для диспетчера. 
+    Помогает избежать сбоев, когда message не определен.
+    """
+    logger.exception(f"Критическая ошибка в обработке Update: {exception}", exc_info=exception)
+    # Здесь можно добавить логику уведомления администратора
+    
 # --- RUN ---
 async def main():
     await db.connect()
@@ -622,4 +606,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
-
