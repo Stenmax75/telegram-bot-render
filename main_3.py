@@ -9,7 +9,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+# ИСПРАВЛЕНИЕ ОШИБКИ: Добавлен ReplyKeyboardBuilder в импорт
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
@@ -61,7 +62,8 @@ class UnsubSkip(StatesGroup):
 
 def get_main_menu_keyboard(has_channels: bool) -> types.ReplyKeyboardMarkup:
     """Генерирует основное меню."""
-    builder = types.ReplyKeyboardBuilder()
+    # ИСПРАВЛЕНИЕ ОШИБКИ: Используем импортированный ReplyKeyboardBuilder напрямую
+    builder = ReplyKeyboardBuilder() 
     builder.button(text="➕ Получить Подписчика")
     builder.button(text="📋 Мои Каналы")
     if has_channels:
