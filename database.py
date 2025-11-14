@@ -242,7 +242,7 @@ class Database:
                 """INSERT INTO channels
                     (channel_id, owner_id, `link`, title, subscribers_needed)
                     VALUES (%s, %s, %s, %s, 0)
-                    ON DUPLICATE KEY UPDATE owner_id = owner_id
+                    ON DUPLICATE KEY UPDATE owner_id = channel_id  #owner_id_было раньше
                 """,
                 # Убеждаемся, что переменные передаются в правильном порядке
                 channel_id, owner_id, link, title
@@ -475,3 +475,4 @@ class Database:
 
 # Экземпляр базы
 db = Database()
+
