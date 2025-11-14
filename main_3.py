@@ -474,6 +474,16 @@ await callback.message.edit_text(
     f"Ваш канал **{my_ch['title']}** теперь в очереди на получение **+1** подписчика (Текущий долг: **{new_debt}**👤).",
     reply_markup=get_main_menu_keyboard(True)
 )
+# уведомляем владельца канала, на который подписались
+owner_info = await db.get_channel_owner_info(target_channel_id)
+if owner_info:
+    try:
+        await bot.send_message(
+            chat_id=owner_info['owner_id'],
+            text=f"🔔 У вашего канала **{target_ch['title']}** новый подписчик по обмену!"
+        )
+    except Exception:
+        logger.exception("Не удалось уведомить владельца")
 
 
 # 9. skip_subscription (Остается без изменений)
@@ -611,4 +621,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
 
