@@ -465,11 +465,16 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
         
     await state.clear()
 
-    await callback.message.edit_text(
-        f"✅ **Поздравляем!** Ваша подписка на канал {target_channel_id} успешно засчитана.\n\n"
-        f"Ваш канал (ID: {channel_that_owes_id}) теперь в очереди на получение **+1** подписчика (Текущий долг: **{new_debt}**👤).",
-        reply_markup=get_main_menu_keyboard(True)
-    )
+    # получаем названия каналов
+target_ch = await db.get_channel_info_by_channel_id(target_channel_id)
+my_ch = await db.get_channel_info_by_channel_id(channel_that_owes_id)
+
+await callback.message.edit_text(
+    f"✅ **Поздравляем!** Ваша подписка на канал **{target_ch['title']}** успешно засчитана.\n\n"
+    f"Ваш канал **{my_ch['title']}** теперь в очереди на получение **+1** подписчика (Текущий долг: **{new_debt}**👤).",
+    reply_markup=get_main_menu_keyboard(True)
+)
+
 
 # 9. skip_subscription (Остается без изменений)
 @dp.callback_query(F.data == "skip_sub")
@@ -606,3 +611,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
