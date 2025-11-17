@@ -450,7 +450,7 @@ def get_ask_mutual_sub_keyboard(from_user_id: int,
     builder = InlineKeyboardBuilder()
     payload = f"mutual_{from_user_id}_{from_channel_id}_{target_channel_id}"
     builder.button(text="🔁 Подписаться в ответ",
-                 url=f"https://t.me/{(await bot.me()).username}?start={payload}")
+            url=f"https://t.me/{(await bot.me()).username}?start={payload}")
     return builder.as_markup()
 
 
@@ -593,5 +593,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
 
 
