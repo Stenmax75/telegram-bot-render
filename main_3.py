@@ -104,6 +104,26 @@ def get_required_sub_keyboard(link: str) -> types.InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ КЛАВИАТУРЫ (ASYNC) ---
+async def get_ask_mutual_sub_keyboard(from_user_id: int,
+                                from_channel_id: int,
+                                target_channel_id: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура для владельца target_channel_id:
+    кнопка «Подписаться в ответ» с deeplinkом вида
+    start=mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
+    """
+    builder = InlineKeyboardBuilder()
+    payload = f"mutual_{from_user_id}_{from_channel_id}_{target_channel_id}"
+    
+    # Используем get_me(), так как это стандартный метод API
+    bot_user = await bot.get_me()
+    
+    builder.button(text="🔁 Подписаться в ответ",
+            url=f"https://t.me/{bot_user.username}?start={payload}")
+    return builder.as_markup()
+
+
 # --- CHECK / VALIDATION HELPERS ---
 async def is_member_of_required_channel(bot: Bot, user_id: int) -> bool:
     try:
@@ -181,6 +201,9 @@ async def get_channel_info_from_input(bot: Bot, input_text: str) -> Optional[Dic
 async def start_command(message: types.Message, state: FSMContext):
     await state.clear()
     await db.add_user(message.from_user.id, message.from_user.username)
+    
+    # Удаляем старую клавиатуру перед отправкой нового сообщения
+    # (опционально, чтобы было чище, но можно оставить "...")
     await message.answer("...", reply_markup=types.ReplyKeyboardRemove())
 
     if not await is_member_of_required_channel(bot, message.from_user.id):
@@ -376,7 +399,11 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("check_sub_"))
 async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    target_channel_id = int(callback.data.split('_')[2])
+    try:
+        target_channel_id = int(callback.data.split('_')[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
 
     state_data = await state.get_data()
     if state_data.get('target_channel_id') != target_channel_id:
@@ -438,30 +465,14 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
     )
 
     # уведомляем владельца канала, на который подписались
-    # --- ДОБАВИТЬ В БЛОК «KEYBOARDS» ---
-def get_ask_mutual_sub_keyboard(from_user_id: int,
-                                from_channel_id: int,
-                                target_channel_id: int) -> types.InlineKeyboardMarkup:
-    """
-    Клавиатура для владельца target_channel_id:
-    кнопка «Подписаться в ответ» с deeplinkом вида
-    start=mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
-    """
-    builder = InlineKeyboardBuilder()
-    payload = f"mutual_{from_user_id}_{from_channel_id}_{target_channel_id}"
-    builder.button(text="🔁 Подписаться в ответ",
-            url=f"https://t.me/{(await bot.me()).username}?start={payload}")
-    return builder.as_markup()
-
-
-# --- ИЗМЕНИТЬ БЛОК ОТПРАВКИ УВЕДОМЛЕНИЯ ---
     owner_info = await db.get_channel_owner_info(target_channel_id)
     if owner_info:
         try:
-            kb = get_ask_mutual_sub_keyboard(
-                from_user_id=user_id,               # кто подписался
-                from_channel_id=channel_that_owes_id, # канал, который должен получить подписчика
-                target_channel_id=target_channel_id   # канал, на который только что подписались
+            # --- ЗДЕСЬ ИСПРАВЛЕН ВЫЗОВ (добавлен await) ---
+            kb = await get_ask_mutual_sub_keyboard(
+                from_user_id=user_id,
+                from_channel_id=channel_that_owes_id,
+                target_channel_id=target_channel_id
             )
             await bot.send_message(
                 chat_id=owner_info['owner_id'],
@@ -471,7 +482,6 @@ def get_ask_mutual_sub_keyboard(from_user_id: int,
             )
         except Exception:
             logger.exception("Не удалось уведомить владельца")
-
 
 
 @dp.callback_query(F.data == "skip_sub")
@@ -593,6 +603,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
-
-
-
