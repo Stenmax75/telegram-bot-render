@@ -12,14 +12,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
-from datetime import timedelta
 from aiogram.filters.command import CommandObject # Добавлено для парсинга deeplink
+from datetime import timedelta
 
 # REDIS / STORAGE
 from aiogram.fsm.storage.redis import RedisStorage, Redis
 
 # Конфиг и БД
-# Предполагается, что config_1 и database существуют
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
 from database import db, NotFoundError, Database
 
@@ -106,7 +105,7 @@ def get_required_sub_keyboard(link: str) -> types.InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ КЛАВИАТУРЫ (ASYNC) ---
+# --- ФУНКЦИЯ КЛАВИАТУРЫ (ASYNC) ---
 async def get_ask_mutual_sub_keyboard(from_user_id: int,
                                       from_channel_id: int,
                                       target_channel_id: int) -> types.InlineKeyboardMarkup:
@@ -121,6 +120,7 @@ async def get_ask_mutual_sub_keyboard(from_user_id: int,
     
     bot_user = await bot.get_me()
     
+    # URL СФОРМИРОВАН КОРРЕКТНО для deep-link
     builder.button(text="🔁 Подписаться в ответ",
                    url=f"https://t.me/{bot_user.username}?start={payload}")
     return builder.as_markup()
@@ -201,88 +201,79 @@ async def get_channel_info_from_input(bot: Bot, input_text: str) -> Optional[Dic
 
 
 # --- HANDLERS ---
+
+# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ДЛЯ /start И DEEPLINK ---
 @dp.message(Command("start"))
-async def start_command(message: types.Message, state: FSMContext):
-    await state.clear()
+async def start_command(message: types.Message, state: FSMContext, command: CommandObject):
     await db.add_user(message.from_user.id, message.from_user.username)
+    user_id = message.from_user.id
     
-    # Игнорируем deeplink, если он не 'mutual_', он будет обработан отдельным хендлером
-    if message.text and message.text.startswith('/start mutual_'):
-        # Если это mutual_deeplink, просто выходим, он будет обработан следующим хендлером
+    # 1. Сначала проверяем, является ли это deep-link для ответной подписки
+    if command.args and command.args.startswith('mutual_'):
+        await state.clear()
+        
+        # Парсим payload: mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
+        try:
+            parts = command.args.split('_')
+            if len(parts) != 4:
+                raise ValueError("Неверное количество аргументов в deeplink.")
+                
+            initial_subscriber_user_id = int(parts[1])
+            channel_to_subscribe_id = int(parts[2])
+            owner_channel_id_to_fulfill = int(parts[3])
+            
+        except (IndexError, ValueError) as e:
+            logger.error(f"Ошибка парсинга deeplink: {e} | Payload: {command.args}")
+            await message.answer("❌ Ошибка в ссылке для ответной подписки. Свяжитесь с поддержкой.", 
+                                 reply_markup=get_back_button())
+            return
+
+        # Проверка, что текущий пользователь (user_id) является владельцем owner_channel_id_to_fulfill
+        owner_channel_info = await db.get_channel_info_by_channel_id(owner_channel_id_to_fulfill)
+        if not owner_channel_info or owner_channel_info.get('owner_id') != user_id:
+            await message.answer("❌ Эта ссылка предназначена только для владельца канала. Операция отменена.", 
+                                 reply_markup=get_back_button())
+            return
+
+        # Получаем информацию о канале, на который нужно подписаться (channel_to_subscribe_id)
+        channel_to_subscribe_info = await db.get_channel_info_by_channel_id(channel_to_subscribe_id)
+        if not channel_to_subscribe_info:
+            await message.answer("❌ Канал, на который нужно подписаться, не найден.", 
+                                 reply_markup=get_back_button())
+            return
+            
+        # Отправляем пользователю задание на подписку
+        await message.answer(
+            f"➡️ **Ответное задание:**\n"
+            f"Для выполнения ответной подписки, подпишитесь на канал **{channel_to_subscribe_info['title']}**.\n\n"
+            f"После проверки ваш канал **{owner_channel_info['title']}** погасит свой долг.",
+            reply_markup=get_sub_keyboard(channel_to_subscribe_info['link'], channel_to_subscribe_info['channel_id'])
+        )
+        
+        # Сохраняем данные для проверки подписки в FSM
+        await state.update_data(
+            target_channel_id=channel_to_subscribe_info['channel_id'],
+            channel_to_receive_sub_id=owner_channel_id_to_fulfill,
+            is_mutual_sub=True
+        )
         return
-    
+
+    # 2. Если это обычный /start (deep-link отсутствует)
+    await state.clear()
     await message.answer("...", reply_markup=types.ReplyKeyboardRemove())
 
-    if not await is_member_of_required_channel(bot, message.from_user.id):
+    if not await is_member_of_required_channel(bot, user_id):
         await message.answer(
             f"👋 Добро пожаловать!\n\nДля начала работы необходимо подписаться на наш основной канал:",
             reply_markup=get_required_sub_keyboard(BOT_SUPPORT_CHANNEL_URL)
         )
         return
 
-    user_channels = await db.get_user_channels_info(message.from_user.id)
+    user_channels = await db.get_user_channels_info(user_id)
     has_channels = len(user_channels) > 0
     await message.answer(
         "✅ Вы подписаны на наш канал. Выберите действие:",
         reply_markup=get_main_menu_keyboard(has_channels)
-    )
-
-
-# --- НОВЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ 'ПОДПИСАТЬСЯ В ОТВЕТ' ---
-@dp.message(Command(re.compile(r"^start mutual_")))
-async def process_mutual_sub_deeplink(message: types.Message, state: FSMContext, command: CommandObject):
-    await state.clear()
-    user_id = message.from_user.id
-    
-    # Парсим payload: mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
-    # command.args - это строка "mutual_12345_67890_-100111222333"
-    try:
-        parts = command.args.split('_')
-        # parts: ['mutual', 'initial_subscriber_user_id', 'channel_to_subscribe_id', 'owner_channel_id_to_fulfill']
-        if len(parts) != 4:
-            raise ValueError("Неверное количество аргументов в deeplink.")
-            
-        # from_user_id (initial_subscriber_user_id) - Пользователь, которому сейчас нужен подписчик
-        # from_channel_id (channel_to_subscribe_id) - Канал, на который подписывается владелец
-        # target_channel_id (owner_channel_id_to_fulfill) - Канал владельца, с которого спишется долг
-        
-        initial_subscriber_user_id = int(parts[1])
-        channel_to_subscribe_id = int(parts[2])
-        owner_channel_id_to_fulfill = int(parts[3])
-        
-    except (IndexError, ValueError) as e:
-        logger.error(f"Ошибка парсинга deeplink: {e} | Payload: {command.args}")
-        await message.answer("❌ Ошибка в ссылке для ответной подписки. Свяжитесь с поддержкой.", 
-                             reply_markup=get_back_button())
-        return
-
-    # 1. Проверяем, что текущий пользователь (user_id) является владельцем owner_channel_id_to_fulfill
-    owner_channel_info = await db.get_channel_info_by_channel_id(owner_channel_id_to_fulfill)
-    if not owner_channel_info or owner_channel_info.get('owner_id') != user_id:
-        await message.answer("❌ Эта ссылка предназначена только для владельца канала. Операция отменена.", 
-                             reply_markup=get_back_button())
-        return
-
-    # 2. Получаем информацию о канале, на который нужно подписаться (channel_to_subscribe_id)
-    channel_to_subscribe_info = await db.get_channel_info_by_channel_id(channel_to_subscribe_id)
-    if not channel_to_subscribe_info:
-        await message.answer("❌ Канал, на который нужно подписаться, не найден.", 
-                             reply_markup=get_back_button())
-        return
-        
-    # 3. Отправляем пользователю задание на подписку
-    await message.answer(
-        f"➡️ **Ответное задание:**\n"
-        f"Для выполнения ответной подписки, подпишитесь на канал **{channel_to_subscribe_info['title']}**.\n\n"
-        f"После проверки ваш канал **{owner_channel_info['title']}** погасит свой долг.",
-        reply_markup=get_sub_keyboard(channel_to_subscribe_info['link'], channel_to_subscribe_info['channel_id'])
-    )
-    
-    # 4. Сохраняем данные для проверки подписки в FSM
-    await state.update_data(
-        target_channel_id=channel_to_subscribe_info['channel_id'], # Канал, на который нужно подписаться
-        channel_to_receive_sub_id=owner_channel_id_to_fulfill, # Канал владельца, с которого спишется долг
-        is_mutual_sub=True # Флаг, что это ответная подписка
     )
 
 
@@ -520,7 +511,6 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
             # 1. ОТВЕТНАЯ ПОДПИСКА (ПОГАШЕНИЕ ДОЛГА)
             
             # Предполагаем, что db.fulfill_debt(channel_id) гасит 1 долг и возвращает новый долг
-            # Эта функция УЖЕ используется в фоновой задаче, поэтому она должна быть доступна
             new_debt = await db.fulfill_debt(channel_that_owes_id)
             
             success_text = (
