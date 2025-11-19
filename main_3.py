@@ -12,15 +12,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.filters.command import CommandObject # Добавлено для парсинга deeplink
+from aiogram.filters.command import CommandObject
 from datetime import timedelta
 
 # REDIS / STORAGE
 from aiogram.fsm.storage.redis import RedisStorage, Redis
 
 # Конфиг и БД
+# ************************************************************
+# Убедитесь, что эти файлы существуют и содержат необходимые переменные/классы
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
 from database import db, NotFoundError, Database
+# ************************************************************
 
 # --- КОНФИГУРАЦИЯ И ЗАПУСК ---
 logging.basicConfig(
@@ -500,8 +503,32 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
     channel_that_owes_id = state_data['channel_to_receive_sub_id']
     is_mutual_sub = state_data.get('is_mutual_sub', False)
     
+    # ПЫТАЕМСЯ ПОЛУЧИТЬ ИНФОРМАЦИЮ О КАНАЛАХ
     target_ch = await db.get_channel_info_by_channel_id(target_channel_id) # Канал, на который подписались
     my_ch = await db.get_channel_info_by_channel_id(channel_that_owes_id) # Канал, который получает или гасит долг
+
+    # ************************************************************
+    # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Проверка на отсутствие канала
+    # ************************************************************
+    if not target_ch or not my_ch:
+        await state.clear()
+        
+        missing_channel_name = ""
+        if not target_ch:
+            missing_channel_name = f"на который нужно было подписаться (ID: `{target_channel_id}`)"
+        elif not my_ch:
+            missing_channel_name = f"который должен был получить/погасить долг (ID: `{channel_that_owes_id}`)"
+
+        await callback.message.edit_text(
+            f"❌ **Ошибка!** Задача не может быть выполнена. Канал {missing_channel_name} не найден в системе. "
+            f"Возможно, он был удален.",
+            reply_markup=get_main_menu_keyboard(True)
+        )
+        await callback.answer("❌ Канал удален или не найден.", show_alert=True)
+        return
+    # ************************************************************
+    # КОНЕЦ ИСПРАВЛЕНИЯ
+    # ************************************************************
 
     success_text = ""
     new_debt = 0
@@ -510,7 +537,7 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
         if is_mutual_sub:
             # 1. ОТВЕТНАЯ ПОДПИСКА (ПОГАШЕНИЕ ДОЛГА)
             
-            # Предполагаем, что db.fulfill_debt(channel_id) гасит 1 долг и возвращает новый долг
+            # db.fulfill_debt(channel_id) гасит 1 долг
             new_debt = await db.fulfill_debt(channel_that_owes_id)
             
             success_text = (
@@ -533,6 +560,7 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
             )
 
     except NotFoundError:
+        # Этот блок для ошибок БД, отличных от 'NoneType'
         await callback.message.edit_text(
             "❌ Ошибка! Ваш канал-получатель подписки не найден. Нажмите '📋 Мои Каналы' для проверки.",
             reply_markup=get_back_button()
@@ -628,10 +656,18 @@ async def check_for_unsubs(bot: Bot, db: Database):
 
                     if not is_subscribed:
                         logger.warning(f"Обнаружена отписка! user: {subscriber_user_id}, channel: {subscribed_channel_id}")
+                        
                         # db.fulfill_debt(channel_id) используется для погашения долга при отписке
-                        new_debt = await db.fulfill_debt(channel_that_owes_id)
+                        try:
+                            new_debt = await db.fulfill_debt(channel_that_owes_id)
+                        except NotFoundError:
+                             # Если канал, который должен был получить штраф, уже удален, просто пропускаем
+                            logger.warning(f"Канал-должник {channel_that_owes_id} не найден при попытке штрафа. Пропуск.")
+                            continue
+
 
                         try:
+                            # Уведомление подписчика
                             await bot.send_message(
                                 chat_id=subscriber_user_id,
                                 text=f"⚠️ **Внимание!** Обнаружена ваша отписка от канала {subscribed_channel_id}.\n"
@@ -644,6 +680,7 @@ async def check_for_unsubs(bot: Bot, db: Database):
                             logger.exception("Не удалось уведомить подписчика об отписке")
 
                         try:
+                            # Уведомление владельца канала, от которого отписались
                             await bot.send_message(
                                 chat_id=owner_id_of_subscribed,
                                 text=f"🔔 **Хорошая новость!** Один из подписчиков, которого вы получили по обмену, "
@@ -666,6 +703,7 @@ async def check_for_unsubs(bot: Bot, db: Database):
 
 
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
+# Обратите внимание: в aiogram 3.x, обработчик ошибок должен принимать event
 @dp.errors()
 async def errors_handler(exception: Exception, event: types.error_event.ErrorEvent):
     logger.exception(f"Критическая ошибка в обработке Update: {exception}", exc_info=exception)
@@ -681,7 +719,9 @@ async def main():
 
     logger.info("Бот запущен.")
     try:
-        await dp.start_polling(bot)
+        # Убедитесь, что вы используете dp.start_polling(bot) для локальной работы
+        # или aiogram.methods.SetWebhook/run_webhook для сервера (как в ваших логах)
+        await dp.start_polling(bot) 
     finally:
         if bg_task:
             bg_task.cancel()
