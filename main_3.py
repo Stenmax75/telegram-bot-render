@@ -13,11 +13,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from datetime import timedelta
+from aiogram.filters.command import CommandObject # Добавлено для парсинга deeplink
 
 # REDIS / STORAGE
 from aiogram.fsm.storage.redis import RedisStorage, Redis
 
 # Конфиг и БД
+# Предполагается, что config_1 и database существуют
 from config_1 import BOT_TOKEN, REQUIRED_CHANNEL_ID
 from database import db, NotFoundError, Database
 
@@ -106,21 +108,21 @@ def get_required_sub_keyboard(link: str) -> types.InlineKeyboardMarkup:
 
 # --- ИСПРАВЛЕННАЯ ФУНКЦИЯ КЛАВИАТУРЫ (ASYNC) ---
 async def get_ask_mutual_sub_keyboard(from_user_id: int,
-                                from_channel_id: int,
-                                target_channel_id: int) -> types.InlineKeyboardMarkup:
+                                      from_channel_id: int,
+                                      target_channel_id: int) -> types.InlineKeyboardMarkup:
     """
     Клавиатура для владельца target_channel_id:
     кнопка «Подписаться в ответ» с deeplinkом вида
     start=mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
     """
     builder = InlineKeyboardBuilder()
+    # Payload для обратной подписки
     payload = f"mutual_{from_user_id}_{from_channel_id}_{target_channel_id}"
     
-    # Используем get_me(), так как это стандартный метод API
     bot_user = await bot.get_me()
     
     builder.button(text="🔁 Подписаться в ответ",
-            url=f"https://t.me/{bot_user.username}?start={payload}")
+                   url=f"https://t.me/{bot_user.username}?start={payload}")
     return builder.as_markup()
 
 
@@ -139,6 +141,7 @@ async def is_bot_admin_in_channel(bot: Bot, chat_id: Union[int, str]) -> bool:
         member = await bot.get_chat_member(chat_id, bot.id)
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
             return False
+        # Проверка прав на приглашение (can_invite_users)
         if member.status == ChatMemberStatus.ADMINISTRATOR and not member.can_invite_users:
             return False
         return True
@@ -173,6 +176,7 @@ async def get_channel_info_from_input(bot: Bot, input_text: str) -> Optional[Dic
         if chat.type not in ['channel', 'supergroup']:
             return None
 
+        # Проверка прав бота
         if not await is_bot_admin_in_channel(bot, chat.id):
             return None
 
@@ -202,8 +206,11 @@ async def start_command(message: types.Message, state: FSMContext):
     await state.clear()
     await db.add_user(message.from_user.id, message.from_user.username)
     
-    # Удаляем старую клавиатуру перед отправкой нового сообщения
-    # (опционально, чтобы было чище, но можно оставить "...")
+    # Игнорируем deeplink, если он не 'mutual_', он будет обработан отдельным хендлером
+    if message.text and message.text.startswith('/start mutual_'):
+        # Если это mutual_deeplink, просто выходим, он будет обработан следующим хендлером
+        return
+    
     await message.answer("...", reply_markup=types.ReplyKeyboardRemove())
 
     if not await is_member_of_required_channel(bot, message.from_user.id):
@@ -218,6 +225,64 @@ async def start_command(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ Вы подписаны на наш канал. Выберите действие:",
         reply_markup=get_main_menu_keyboard(has_channels)
+    )
+
+
+# --- НОВЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ 'ПОДПИСАТЬСЯ В ОТВЕТ' ---
+@dp.message(Command(re.compile(r"^start mutual_")))
+async def process_mutual_sub_deeplink(message: types.Message, state: FSMContext, command: CommandObject):
+    await state.clear()
+    user_id = message.from_user.id
+    
+    # Парсим payload: mutual_<from_user_id>_<from_channel_id>_<target_channel_id>
+    # command.args - это строка "mutual_12345_67890_-100111222333"
+    try:
+        parts = command.args.split('_')
+        # parts: ['mutual', 'initial_subscriber_user_id', 'channel_to_subscribe_id', 'owner_channel_id_to_fulfill']
+        if len(parts) != 4:
+            raise ValueError("Неверное количество аргументов в deeplink.")
+            
+        # from_user_id (initial_subscriber_user_id) - Пользователь, которому сейчас нужен подписчик
+        # from_channel_id (channel_to_subscribe_id) - Канал, на который подписывается владелец
+        # target_channel_id (owner_channel_id_to_fulfill) - Канал владельца, с которого спишется долг
+        
+        initial_subscriber_user_id = int(parts[1])
+        channel_to_subscribe_id = int(parts[2])
+        owner_channel_id_to_fulfill = int(parts[3])
+        
+    except (IndexError, ValueError) as e:
+        logger.error(f"Ошибка парсинга deeplink: {e} | Payload: {command.args}")
+        await message.answer("❌ Ошибка в ссылке для ответной подписки. Свяжитесь с поддержкой.", 
+                             reply_markup=get_back_button())
+        return
+
+    # 1. Проверяем, что текущий пользователь (user_id) является владельцем owner_channel_id_to_fulfill
+    owner_channel_info = await db.get_channel_info_by_channel_id(owner_channel_id_to_fulfill)
+    if not owner_channel_info or owner_channel_info.get('owner_id') != user_id:
+        await message.answer("❌ Эта ссылка предназначена только для владельца канала. Операция отменена.", 
+                             reply_markup=get_back_button())
+        return
+
+    # 2. Получаем информацию о канале, на который нужно подписаться (channel_to_subscribe_id)
+    channel_to_subscribe_info = await db.get_channel_info_by_channel_id(channel_to_subscribe_id)
+    if not channel_to_subscribe_info:
+        await message.answer("❌ Канал, на который нужно подписаться, не найден.", 
+                             reply_markup=get_back_button())
+        return
+        
+    # 3. Отправляем пользователю задание на подписку
+    await message.answer(
+        f"➡️ **Ответное задание:**\n"
+        f"Для выполнения ответной подписки, подпишитесь на канал **{channel_to_subscribe_info['title']}**.\n\n"
+        f"После проверки ваш канал **{owner_channel_info['title']}** погасит свой долг.",
+        reply_markup=get_sub_keyboard(channel_to_subscribe_info['link'], channel_to_subscribe_info['channel_id'])
+    )
+    
+    # 4. Сохраняем данные для проверки подписки в FSM
+    await state.update_data(
+        target_channel_id=channel_to_subscribe_info['channel_id'], # Канал, на который нужно подписаться
+        channel_to_receive_sub_id=owner_channel_id_to_fulfill, # Канал владельца, с которого спишется долг
+        is_mutual_sub=True # Флаг, что это ответная подписка
     )
 
 
@@ -376,6 +441,7 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
     target_channel = await db.get_target_channel(user_id, excluded_ids)
 
     if not target_channel:
+        # Это сообщение показывается, если нет каналов для подписки (включая собственный канал)
         await callback.message.edit_text(
             "🎉 Поздравляем! Вы подписались на все доступные каналы.\n"
             "Подождите, пока в системе появятся новые каналы.",
@@ -386,12 +452,17 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(
         target_channel_id=target_channel['channel_id'],
-        channel_to_receive_sub_id=channel_to_receive_sub['channel_id']
+        channel_to_receive_sub_id=channel_to_receive_sub['channel_id'],
+        is_mutual_sub=False # Сбрасываем флаг, если он был
     )
+    
+    current_channel_debt = channel_to_receive_sub['subscribers_needed']
+    target_channel_debt = target_channel['subscribers_needed']
+    
     await callback.message.edit_text(
         f"➡️ **Ваше задание:**\n"
-        f"Подпишитесь на канал **{target_channel['title']}** (долг: {target_channel['subscribers_needed']}👤).\n\n"
-        f"После проверки подписки, ваш канал **{channel_to_receive_sub['title']}** получит +1 в очередь на подписку (долг: {channel_to_receive_sub['subscribers_needed']}👤).",
+        f"Подпишитесь на канал **{target_channel['title']}** (долг: {target_channel_debt}👤).\n\n"
+        f"После проверки подписки, ваш канал **{channel_to_receive_sub['title']}** получит +1 в очередь на подписку (долг: {current_channel_debt}👤).",
         reply_markup=get_sub_keyboard(target_channel['link'], target_channel['channel_id'])
     )
 
@@ -400,14 +471,17 @@ async def start_get_sub(callback: types.CallbackQuery, state: FSMContext):
 async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     try:
+        # Извлекаем ID канала, на который пользователь должен был подписаться
         target_channel_id = int(callback.data.split('_')[2])
     except (IndexError, ValueError):
         await callback.answer("Ошибка данных.", show_alert=True)
         return
 
     state_data = await state.get_data()
+    # Проверка, что нажата кнопка для текущей задачи
     if state_data.get('target_channel_id') != target_channel_id:
         await callback.answer("Ошибка: Проверьте, что вы нажали кнопку для текущей задачи.", show_alert=True)
+        # Перенаправляем в меню для сброса состояния
         await callback.message.edit_text(
             "⚠️ Ваша текущая задача устарела. Нажмите '➕ Получить Подписчика' снова.",
             reply_markup=get_main_menu_keyboard(True)
@@ -431,13 +505,43 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
         )
         return
 
+    # --- ЛОГИКА ОБРАБОТКИ УСПЕШНОЙ ПОДПИСКИ ---
     channel_that_owes_id = state_data['channel_to_receive_sub_id']
+    is_mutual_sub = state_data.get('is_mutual_sub', False)
+    
+    target_ch = await db.get_channel_info_by_channel_id(target_channel_id) # Канал, на который подписались
+    my_ch = await db.get_channel_info_by_channel_id(channel_that_owes_id) # Канал, который получает или гасит долг
+
+    success_text = ""
+    new_debt = 0
+    
     try:
-        new_debt = await db.register_subscription_and_create_debt(
-            subscriber_user_id=user_id,
-            subscribed_channel_id=target_channel_id,
-            channel_that_owes_id=channel_that_owes_id
-        )
+        if is_mutual_sub:
+            # 1. ОТВЕТНАЯ ПОДПИСКА (ПОГАШЕНИЕ ДОЛГА)
+            
+            # Предполагаем, что db.fulfill_debt(channel_id) гасит 1 долг и возвращает новый долг
+            # Эта функция УЖЕ используется в фоновой задаче, поэтому она должна быть доступна
+            new_debt = await db.fulfill_debt(channel_that_owes_id)
+            
+            success_text = (
+                f"✅ **Поздравляем!** Ответная подписка на канал **{target_ch['title']}** засчитана.\n\n"
+                f"Ваш канал **{my_ch['title']}** (ID: {channel_that_owes_id}) погасил 1 единицу долга. "
+                f"Текущий долг: **{new_debt}**👤."
+            )
+            
+        else:
+            # 2. СТАНДАРТНАЯ ПОДПИСКА (СОЗДАНИЕ ДОЛГА)
+            new_debt = await db.register_subscription_and_create_debt(
+                subscriber_user_id=user_id,
+                subscribed_channel_id=target_channel_id,
+                channel_that_owes_id=channel_that_owes_id
+            )
+            
+            success_text = (
+                f"✅ **Поздравляем!** Ваша подписка на канал **{target_ch['title']}** успешно засчитана.\n\n"
+                f"Ваш канал **{my_ch['title']}** теперь в очереди на получение **+1** подписчика (Текущий долг: **{new_debt}**👤)."
+            )
+
     except NotFoundError:
         await callback.message.edit_text(
             "❌ Ошибка! Ваш канал-получатель подписки не найден. Нажмите '📋 Мои Каналы' для проверки.",
@@ -445,7 +549,7 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
         )
         return
     except Exception:
-        logger.exception("Критическая ошибка при регистрации долга")
+        logger.exception("Критическая ошибка при регистрации/погашении долга")
         await callback.message.edit_text(
             "❌ Критическая ошибка базы данных при регистрации подписки. Повторите попытку.",
             reply_markup=get_back_button()
@@ -454,34 +558,30 @@ async def check_subscription(callback: types.CallbackQuery, state: FSMContext):
 
     await state.clear()
 
-    # получаем названия каналов
-    target_ch = await db.get_channel_info_by_channel_id(target_channel_id)
-    my_ch = await db.get_channel_info_by_channel_id(channel_that_owes_id)
-
     await callback.message.edit_text(
-        f"✅ **Поздравляем!** Ваша подписка на канал **{target_ch['title']}** успешно засчитана.\n\n"
-        f"Ваш канал **{my_ch['title']}** теперь в очереди на получение **+1** подписчика (Текущий долг: **{new_debt}**👤).",
+        success_text,
         reply_markup=get_main_menu_keyboard(True)
     )
 
-    # уведомляем владельца канала, на который подписались
-    owner_info = await db.get_channel_owner_info(target_channel_id)
-    if owner_info:
-        try:
-            # --- ЗДЕСЬ ИСПРАВЛЕН ВЫЗОВ (добавлен await) ---
-            kb = await get_ask_mutual_sub_keyboard(
-                from_user_id=user_id,
-                from_channel_id=channel_that_owes_id,
-                target_channel_id=target_channel_id
-            )
-            await bot.send_message(
-                chat_id=owner_info['owner_id'],
-                text=(f"🔔 У вашего канала **{target_ch['title']}** новый подписчик по обмену!\n\n"
-                      f"Пожалуйста, подпишитесь на канал **{my_ch['title']}** в ответ."),
-                reply_markup=kb
-            )
-        except Exception:
-            logger.exception("Не удалось уведомить владельца")
+    # УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦА ТОЛЬКО ПРИ СТАНДАРТНОЙ ПОДПИСКЕ
+    if not is_mutual_sub:
+        owner_info = await db.get_channel_owner_info(target_channel_id)
+        if owner_info:
+            try:
+                # Владелец канала, на который подписались, получает уведомление
+                kb = await get_ask_mutual_sub_keyboard(
+                    from_user_id=user_id,
+                    from_channel_id=channel_that_owes_id,
+                    target_channel_id=target_channel_id
+                )
+                await bot.send_message(
+                    chat_id=owner_info['owner_id'],
+                    text=(f"🔔 У вашего канала **{target_ch['title']}** новый подписчик по обмену!\n\n"
+                          f"Пожалуйста, подпишитесь на канал **{my_ch['title']}** в ответ."),
+                    reply_markup=kb
+                )
+            except Exception:
+                logger.exception("Не удалось уведомить владельца")
 
 
 @dp.callback_query(F.data == "skip_sub")
@@ -499,6 +599,7 @@ async def skip_subscription(callback: types.CallbackQuery, state: FSMContext):
         await state.update_data(excluded_channel_ids=excluded_ids)
 
     await callback.answer("Канал пропущен.", show_alert=False)
+    # Удаляем старое сообщение и вызываем новую задачу
     await callback.message.delete()
     await start_get_sub(callback, state)
 
@@ -510,6 +611,7 @@ async def check_for_unsubs(bot: Bot, db: Database):
         logger.info("Запуск фоновой проверки подписок...")
 
         try:
+            # Получаем ограниченное количество подписок для проверки
             subscriptions_to_check = await db.get_active_subscriptions_to_check(limit=50)
             if not subscriptions_to_check:
                 logger.info("Нет активных подписок для проверки.")
@@ -536,6 +638,7 @@ async def check_for_unsubs(bot: Bot, db: Database):
 
                     if not is_subscribed:
                         logger.warning(f"Обнаружена отписка! user: {subscriber_user_id}, channel: {subscribed_channel_id}")
+                        # db.fulfill_debt(channel_id) используется для погашения долга при отписке
                         new_debt = await db.fulfill_debt(channel_that_owes_id)
 
                         try:
